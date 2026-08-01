@@ -381,7 +381,7 @@ Sections are separated with whitespace and headings, not boxes:
 
  IDENTITY
  PID          18422              OWNER        mika
- EXECUTABLE   /home/mika/.local/bin/nira
+ EXECUTABLE   /home/user/.local/bin/nira
  STARTED      14:08              AGE          01:42:13
 
  RESOURCES
