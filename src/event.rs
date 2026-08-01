@@ -3,11 +3,12 @@ use std::{io, time::Duration};
 use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::Backend};
 
-use crate::{app::App, tui};
+use crate::{app::App, process::ScanWorker, tui};
 
 pub fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
+    scanner: &ScanWorker,
     options: tui::RenderOptions,
     refresh_interval: Duration,
 ) -> io::Result<()>
@@ -20,6 +21,15 @@ where
         .unwrap_or_else(std::time::Instant::now);
 
     while !app.should_quit {
+        if let Some(message) = scanner.try_latest() {
+            let _captured_at = message.captured_at;
+            match message.result {
+                Ok(processes) => app.apply_snapshot(processes),
+                Err(error) => app.report_scan_error(&error),
+            }
+            dirty = true;
+        }
+
         if dirty || last_draw.elapsed() >= refresh_interval {
             terminal
                 .draw(|frame| tui::render(frame, app, options))

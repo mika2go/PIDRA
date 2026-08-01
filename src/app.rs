@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::process::{ProcessIdentity, ProcessSnapshot};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusColumn {
     Restart,
@@ -25,17 +27,9 @@ impl FocusColumn {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FixtureProcess {
-    pub name: &'static str,
-    pub pid: i32,
-    pub rss_bytes: u64,
-    pub restart_available: bool,
-}
-
 #[derive(Debug)]
 pub struct App {
-    pub processes: Vec<FixtureProcess>,
+    pub processes: Vec<ProcessSnapshot>,
     pub selected: usize,
     pub focus: FocusColumn,
     pub status: String,
@@ -44,45 +38,62 @@ pub struct App {
 
 impl App {
     #[must_use]
+    pub fn new() -> Self {
+        Self {
+            processes: Vec::new(),
+            selected: 0,
+            focus: FocusColumn::Restart,
+            status: "Scanning /proc…".to_owned(),
+            should_quit: false,
+        }
+    }
+
+    #[must_use]
     pub fn fixture() -> Self {
         Self {
             processes: vec![
-                FixtureProcess {
-                    name: "nira",
-                    pid: 18_422,
-                    rss_bytes: 1_932_735_283,
-                    restart_available: true,
-                },
-                FixtureProcess {
-                    name: "firefox",
-                    pid: 2_204,
-                    rss_bytes: 3_328_599_654,
-                    restart_available: true,
-                },
-                FixtureProcess {
-                    name: "qs",
-                    pid: 1_198,
-                    rss_bytes: 432_013_312,
-                    restart_available: true,
-                },
-                FixtureProcess {
-                    name: "pipewire",
-                    pid: 806,
-                    rss_bytes: 32_505_856,
-                    restart_available: true,
-                },
-                FixtureProcess {
-                    name: "ffmpeg",
-                    pid: 19_102,
-                    rss_bytes: 0,
-                    restart_available: false,
-                },
+                ProcessSnapshot::fixture("nira", 18_422, 1_932_735_283),
+                ProcessSnapshot::fixture("firefox", 2_204, 3_328_599_654),
+                ProcessSnapshot::fixture("qs", 1_198, 432_013_312),
+                ProcessSnapshot::fixture("pipewire", 806, 32_505_856),
+                ProcessSnapshot::fixture("ffmpeg", 19_102, 0),
             ],
             selected: 0,
             focus: FocusColumn::Restart,
             status: "Phase 0 fixture — no real process actions are enabled".to_owned(),
             should_quit: false,
         }
+    }
+
+    pub fn apply_snapshot(&mut self, mut processes: Vec<ProcessSnapshot>) {
+        let selected_identity = self
+            .processes
+            .get(self.selected)
+            .map(|process| process.identity);
+        let previous_index = self.selected;
+
+        processes.sort_by(|left, right| {
+            right
+                .rss_bytes
+                .cmp(&left.rss_bytes)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.identity.pid.cmp(&right.identity.pid))
+        });
+        self.processes = processes;
+        self.selected = selected_identity
+            .and_then(|identity| self.index_of(identity))
+            .unwrap_or_else(|| previous_index.min(self.processes.len().saturating_sub(1)));
+        self.status = format!("Read {} processes from /proc", self.processes.len());
+    }
+
+    pub fn report_scan_error(&mut self, error: &str) {
+        self.status = format!("Process scan failed: {error}");
+    }
+
+    fn index_of(&self, identity: ProcessIdentity) -> Option<usize> {
+        self.processes
+            .iter()
+            .position(|process| process.identity == identity)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -127,19 +138,29 @@ impl App {
         };
 
         self.status = match self.focus {
-            FocusColumn::Restart if process.restart_available => {
-                format!("Fixture only: restart {} ({})", process.name, process.pid)
-            }
-            FocusColumn::Restart => {
-                format!("Restart unavailable for {} ({})", process.name, process.pid)
-            }
+            FocusColumn::Restart => format!(
+                "Restart unavailable for {} ({}) until Phase 5",
+                process.name, process.identity.pid
+            ),
             FocusColumn::Stop => {
-                format!("Fixture only: stop {} ({})", process.name, process.pid)
+                format!(
+                    "Stop disabled for {} ({}) until safe signalling is implemented",
+                    process.name, process.identity.pid
+                )
             }
             FocusColumn::Details => {
-                format!("Fixture only: details {} ({})", process.name, process.pid)
+                format!(
+                    "Details for {} ({}) arrive in Phase 3",
+                    process.name, process.identity.pid
+                )
             }
         };
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -198,5 +219,18 @@ mod tests {
         app.handle_key(key(KeyCode::Char('q')));
 
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn refresh_preserves_selection_by_identity() {
+        let mut app = App::fixture();
+        app.selected = 2;
+        let selected_identity = app.processes[2].identity;
+        let mut refreshed = app.processes.clone();
+        refreshed[2].rss_bytes = u64::MAX;
+
+        app.apply_snapshot(refreshed);
+
+        assert_eq!(app.processes[app.selected].identity, selected_identity);
     }
 }

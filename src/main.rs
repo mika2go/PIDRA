@@ -5,6 +5,7 @@ use pidra::{
     app::App,
     cli::Cli,
     event,
+    process::ScanWorker,
     terminal::{TerminalSession, install_panic_hook},
     tui::RenderOptions,
 };
@@ -24,7 +25,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = TerminalSession::enter(mouse_enabled)?;
     install_panic_hook(mouse_enabled);
 
-    let mut app = App::fixture();
+    let mut app = App::new();
+    let scanner = ScanWorker::spawn_system(cli.refresh_interval());
     let options = RenderOptions {
         ascii: cli.ascii,
         no_color: cli.no_color,
@@ -33,6 +35,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     event::run(
         session.terminal_mut(),
         &mut app,
+        &scanner,
         options,
         cli.refresh_interval(),
     )?;

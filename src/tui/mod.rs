@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
 
     let title = Line::from(vec![
         "PIDRA".into(),
-        format!("{:>42} GUI PROCESSES", app.processes.len()).into(),
+        format!("{:>42} PROCESSES", app.processes.len()).into(),
         "       CPU 07  MEM 24".into(),
     ])
     .style(palette.header());

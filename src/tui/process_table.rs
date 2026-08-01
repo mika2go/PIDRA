@@ -6,7 +6,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, FixtureProcess, FocusColumn},
+    app::{App, FocusColumn},
+    process::ProcessSnapshot,
     tui::{RenderOptions, theme::Palette},
 };
 
@@ -43,7 +44,7 @@ pub fn render(
 }
 
 fn row<'a>(
-    process: &'a FixtureProcess,
+    process: &'a ProcessSnapshot,
     selected: bool,
     focus: FocusColumn,
     options: RenderOptions,
@@ -54,17 +55,13 @@ fn row<'a>(
         (true, false) => "›",
         (false, _) => " ",
     };
-    let restart = if process.restart_available {
-        if options.ascii { "[R]" } else { "[↻]" }
-    } else {
-        "--"
-    };
+    let restart = "--";
     let stop = if options.ascii { "[S]" } else { "[■]" };
     let details = if options.ascii { "[D]" } else { "[i]" };
 
     Row::new(vec![
         Cell::from(format!("{marker}{}", process.name)),
-        Cell::from(process.pid.to_string()),
+        Cell::from(process.identity.pid.to_string()),
         Cell::from(format_bytes(process.rss_bytes)),
         action_cell(restart, selected && focus == FocusColumn::Restart, palette),
         action_cell(stop, selected && focus == FocusColumn::Stop, palette),
