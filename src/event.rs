@@ -1,7 +1,7 @@
 use std::{io, time::Duration};
 
-use crossterm::event::{self, Event};
-use ratatui::{Terminal, backend::Backend};
+use crossterm::event::{self, Event, MouseButton, MouseEventKind};
+use ratatui::{Terminal, backend::Backend, layout::Rect};
 
 use crate::{app::App, process::ScanWorker, tui};
 
@@ -16,6 +16,7 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let mut dirty = true;
+    let mut frame_area = Rect::default();
     let mut last_draw = std::time::Instant::now()
         .checked_sub(refresh_interval)
         .unwrap_or_else(std::time::Instant::now);
@@ -24,7 +25,7 @@ where
         if let Some(message) = scanner.try_latest() {
             let _captured_at = message.captured_at;
             match message.result {
-                Ok(processes) => app.apply_snapshot(processes),
+                Ok(batch) => app.apply_scan_batch(batch),
                 Err(error) => app.report_scan_error(&error),
             }
             dirty = true;
@@ -32,7 +33,10 @@ where
 
         if dirty || last_draw.elapsed() >= refresh_interval {
             terminal
-                .draw(|frame| tui::render(frame, app, options))
+                .draw(|frame| {
+                    frame_area = frame.area();
+                    tui::render(frame, app, options);
+                })
                 .map_err(io::Error::other)?;
             dirty = false;
             last_draw = std::time::Instant::now();
@@ -47,7 +51,27 @@ where
                     dirty = true;
                 }
                 Event::Resize(_, _) => dirty = true,
-                Event::FocusGained | Event::FocusLost | Event::Mouse(_) | Event::Paste(_) => {}
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => app.select_previous(),
+                        MouseEventKind::ScrollDown => app.select_next(),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(hit) =
+                                tui::table_hit(frame_area, app, mouse.column, mouse.row)
+                            {
+                                app.select_from_pointer(hit.row, hit.focus);
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Right | MouseButton::Middle)
+                        | MouseEventKind::Up(_)
+                        | MouseEventKind::Drag(_)
+                        | MouseEventKind::Moved
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight => {}
+                    }
+                    dirty = true;
+                }
+                Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
             }
         }
     }

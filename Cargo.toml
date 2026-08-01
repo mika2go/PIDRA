@@ -8,8 +8,11 @@ description = "Keyboard-first Linux terminal process manager"
 clap = { version = "4.6.5", features = ["derive"] }
 crossterm = "0.29.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-rustix = { version = "1.1.4", features = ["param"] }
+rustix = { version = "1.1.4", features = ["param", "process"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 thiserror = "2.0.19"
+x11rb = "0.14.0"
 
 [profile.release]
 lto = "thin"

@@ -5,12 +5,22 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use super::{ProcessSnapshot, procfs};
+use super::{
+    GuiClassification, ProcessSnapshot,
+    gui::{classify_gui_processes, discover_window_hints},
+    procfs,
+};
+
+#[derive(Debug)]
+pub struct ScanBatch {
+    pub processes: Vec<ProcessSnapshot>,
+    pub graphical: Vec<GuiClassification>,
+}
 
 #[derive(Debug)]
 pub struct ScanMessage {
     pub captured_at: SystemTime,
-    pub result: Result<Vec<ProcessSnapshot>, String>,
+    pub result: Result<ScanBatch, String>,
 }
 
 #[derive(Debug)]
@@ -23,18 +33,39 @@ pub struct ScanWorker {
 impl ScanWorker {
     #[must_use]
     pub fn spawn_system(refresh_interval: Duration) -> Self {
-        Self::spawn(PathBuf::from("/proc"), refresh_interval)
+        Self::spawn_with_gui_detection(PathBuf::from("/proc"), refresh_interval, true)
     }
 
     #[must_use]
     pub fn spawn(root: PathBuf, refresh_interval: Duration) -> Self {
+        Self::spawn_with_gui_detection(root, refresh_interval, false)
+    }
+
+    fn spawn_with_gui_detection(
+        root: PathBuf,
+        refresh_interval: Duration,
+        detect_windows: bool,
+    ) -> Self {
         let (message_sender, receiver) = mpsc::channel();
         let (stop_sender, stop_receiver) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("pidra-procfs-scanner".to_owned())
             .spawn(move || {
                 loop {
-                    let result = procfs::scan_procfs(&root).map_err(|error| error.to_string());
+                    let result = procfs::scan_procfs(&root)
+                        .map(|processes| {
+                            let window_hints = if detect_windows {
+                                discover_window_hints()
+                            } else {
+                                Vec::new()
+                            };
+                            let graphical = classify_gui_processes(&processes, &window_hints);
+                            ScanBatch {
+                                processes,
+                                graphical,
+                            }
+                        })
+                        .map_err(|error| error.to_string());
                     if message_sender
                         .send(ScanMessage {
                             captured_at: SystemTime::now(),
