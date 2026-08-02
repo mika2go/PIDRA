@@ -118,6 +118,7 @@ fn direct_request(identity: ProcessIdentity) -> RestartRequest {
             executable: PathBuf::from("/usr/bin/sleep"),
             arguments: vec![OsString::from("30")],
             working_directory: PathBuf::from("/tmp"),
+            application_scope: None,
         },
     }
 }

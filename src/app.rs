@@ -61,6 +61,14 @@ pub enum FocusColumn {
 }
 
 impl FocusColumn {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Restart => "RESTART",
+            Self::Stop => "STOP",
+            Self::Details => "DETAILS",
+        }
+    }
+
     fn previous(self) -> Self {
         match self {
             Self::Restart => Self::Restart,
@@ -208,6 +216,9 @@ impl App {
     }
 
     pub fn apply_scan_batch(&mut self, batch: ScanBatch) {
+        let replace_with_scan_summary = self.status == "Scanning /proc…"
+            || self.status.starts_with("Showing ")
+            || self.status.starts_with("Process scan failed:");
         let selected_identity = self
             .processes
             .get(self.selected)
@@ -222,12 +233,13 @@ impl App {
         self.open_requested_pid();
         self.rebuild_visible(selected_identity);
         self.observe_pending_actions();
-        let details_missing = self
-            .details_root
-            .is_some_and(|identity| self.process_by_identity(identity).is_none());
+        let details_missing = matches!(self.view, AppView::Details | AppView::Confirm)
+            && self
+                .details_root
+                .is_some_and(|identity| self.process_by_identity(identity).is_none());
         if details_missing {
             self.status = "The detailed process identity no longer exists".to_owned();
-        } else if self.view == AppView::Table {
+        } else if self.view == AppView::Table && replace_with_scan_summary {
             self.status = format!(
                 "Showing {} GUI processes from {} scanned processes",
                 self.processes.len(),
@@ -438,6 +450,11 @@ impl App {
                         "Queued RESTART for {} ({})",
                         confirmation.process_name, confirmation.identity.pid
                     );
+                    tracing::info!(
+                        pid = confirmation.identity.pid,
+                        start_ticks = confirmation.identity.start_time_ticks,
+                        "restart queued after confirmation"
+                    );
                     self.pending_restarts.push_back(RestartRequest {
                         identity: confirmation.identity,
                         process_name: confirmation.process_name,
@@ -546,7 +563,16 @@ impl App {
             self.focus = column;
             if was_selected && was_focused {
                 self.activate_focused_action();
+            } else if let Some(process) = self.processes.get(row) {
+                self.status = format!(
+                    "Selected {} for {} ({}) — click again or press Enter",
+                    column.label(),
+                    process.name,
+                    process.identity.pid
+                );
             }
+        } else if let Some(process) = self.processes.get(row) {
+            self.status = format!("Selected {} ({})", process.name, process.identity.pid);
         }
     }
 
@@ -648,6 +674,12 @@ impl App {
         );
         if assessment.rating == crate::control::risk::RiskRating::Protected {
             self.status = format!("Action blocked: {}", assessment.evidence.join("; "));
+            tracing::warn!(
+                pid = process.identity.pid,
+                start_ticks = process.identity.start_time_ticks,
+                action = action.label(),
+                "process action blocked by safety policy"
+            );
             return;
         }
         self.pending_control.push_back(ControlRequest {
@@ -663,6 +695,12 @@ impl App {
             action.label(),
             process.name,
             process.identity.pid
+        );
+        tracing::info!(
+            pid = process.identity.pid,
+            start_ticks = process.identity.start_time_ticks,
+            action = action.label(),
+            "process action queued"
         );
     }
 
@@ -732,10 +770,12 @@ impl App {
 
     pub fn report_control_dispatch_error(&mut self, error: &str) {
         self.status = format!("Control worker error: {error}");
+        tracing::error!(error, "control worker dispatch failed");
     }
 
     pub fn report_restart_dispatch_error(&mut self, error: &str) {
         self.status = format!("Restart worker error: {error}");
+        tracing::error!(error, "restart worker dispatch failed");
     }
 
     pub fn apply_restart_result(&mut self, result: RestartResult) {
@@ -749,6 +789,12 @@ impl App {
             result.outcome.message(),
         );
         self.status = message;
+        tracing::info!(
+            pid = result.request.identity.pid,
+            start_ticks = result.request.identity.start_time_ticks,
+            outcome = %result.outcome.message(),
+            "restart completed"
+        );
     }
 
     pub fn apply_control_result(&mut self, result: ControlResult) {
@@ -760,6 +806,13 @@ impl App {
         self.latest_actions
             .insert(result.request.identity, message.clone());
         self.status = message;
+        tracing::info!(
+            pid = result.request.identity.pid,
+            start_ticks = result.request.identity.start_time_ticks,
+            action = result.request.action.label(),
+            outcome = %result.outcome.message(),
+            "kernel signal result received"
+        );
         let context = self
             .queued_diagnosis
             .remove(&(result.request.identity, result.request.action));
@@ -824,6 +877,13 @@ impl App {
             self.pending_observation.remove(&identity);
             let message = format!("{}: {summary}", action.label());
             self.latest_actions.insert(identity, message.clone());
+            tracing::info!(
+                pid = identity.pid,
+                start_ticks = identity.start_time_ticks,
+                action = action.label(),
+                diagnosis = %summary,
+                "process action observation completed"
+            );
             self.history
                 .record(process_name, identity, action.label(), summary);
             self.status = message;
@@ -1264,5 +1324,46 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
         assert_eq!(app.view, AppView::Details);
+    }
+
+    #[test]
+    fn scanner_refresh_does_not_erase_a_control_result() {
+        let mut app = App::fixture();
+        let identity = app.processes[0].identity;
+        app.apply_control_result(ControlResult {
+            request: crate::control::ControlRequest {
+                identity,
+                action: SignalAction::Stop,
+            },
+            outcome: ControlOutcome::PermissionDenied,
+        });
+        let expected = app.status.clone();
+        let graphical = app.gui_classifications.values().cloned().collect();
+
+        app.apply_scan_batch(ScanBatch {
+            processes: app.all_processes.clone(),
+            graphical,
+            system: SystemMetrics::default(),
+        });
+
+        assert_eq!(app.status, expected);
+        assert!(app.status.contains("PERMISSION DENIED"));
+    }
+
+    #[test]
+    fn first_action_click_explains_confirmation_and_second_click_activates() {
+        let mut app = App::fixture();
+        let uid = rustix::process::getuid().as_raw();
+        app.processes[0].uid = uid;
+        app.all_processes[0].uid = uid;
+
+        app.select_from_pointer(0, Some(FocusColumn::Stop));
+        assert!(app.status.contains("click again or press Enter"));
+        assert_eq!(app.take_control_requests().count(), 0);
+
+        app.select_from_pointer(0, Some(FocusColumn::Stop));
+        let requests: Vec<_> = app.take_control_requests().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].action, SignalAction::Stop);
     }
 }

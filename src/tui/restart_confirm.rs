@@ -45,6 +45,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             executable,
             arguments,
             working_directory,
+            application_scope,
         } => (
             "DIRECT EXEC".to_owned(),
             format!(
@@ -53,7 +54,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
                 arguments.len(),
                 working_directory.display()
             ),
-            "PIDRA cannot reconstruct the original environment completely".to_owned(),
+            application_scope.as_deref().map_or_else(
+                || "PIDRA cannot reconstruct the original environment completely".to_owned(),
+                |scope| {
+                    format!(
+                        "{scope} is transient and cannot start the app; PIDRA must use direct exec"
+                    )
+                },
+            ),
         ),
         RestartSource::Unavailable { reason } => (
             "UNAVAILABLE".to_owned(),

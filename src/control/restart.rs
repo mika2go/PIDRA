@@ -30,6 +30,7 @@ pub enum RestartSource {
         executable: PathBuf,
         arguments: Vec<OsString>,
         working_directory: PathBuf,
+        application_scope: Option<String>,
     },
     Unavailable {
         reason: String,
@@ -97,12 +98,20 @@ impl RestartSource {
                 executable,
                 arguments,
                 working_directory,
-            } => format!(
-                "direct {} ({} arguments, cwd {})",
-                executable.display(),
-                arguments.len(),
-                working_directory.display()
-            ),
+                application_scope,
+            } => {
+                let scope_note = application_scope
+                    .as_deref()
+                    .map_or_else(String::new, |scope| {
+                        format!("; transient scope {scope} cannot be started by systemd")
+                    });
+                format!(
+                    "direct {} ({} arguments, cwd {}){scope_note}",
+                    executable.display(),
+                    arguments.len(),
+                    working_directory.display()
+                )
+            }
             Self::Unavailable { reason } => format!("unavailable — {reason}"),
         }
     }
@@ -139,6 +148,7 @@ pub fn resolve_restart_source(process: &ProcessSnapshot) -> RestartSource {
         executable,
         arguments: process.command.iter().skip(1).cloned().collect(),
         working_directory,
+        application_scope: systemd_scope_unit(&process.cgroups),
     }
 }
 
@@ -150,6 +160,7 @@ pub fn execute_restart(request: &RestartRequest) -> RestartOutcome {
             executable,
             arguments,
             working_directory,
+            ..
         } => restart_direct(request, executable, arguments, working_directory),
         RestartSource::Unavailable { reason } => RestartOutcome::Unavailable(reason.clone()),
     }
@@ -404,6 +415,17 @@ fn systemd_service_unit(cgroups: &[String]) -> Option<String> {
     })
 }
 
+fn systemd_scope_unit(cgroups: &[String]) -> Option<String> {
+    cgroups.iter().find_map(|entry| {
+        let path = entry
+            .split_once("::")
+            .map_or(entry.as_str(), |(_, path)| path);
+        path.rsplit('/')
+            .find(|component| component.ends_with(".scope"))
+            .map(str::to_owned)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, path::PathBuf};
@@ -445,8 +467,29 @@ mod tests {
                 executable: PathBuf::from("/usr/bin/demo"),
                 arguments: vec![OsString::from("--safe")],
                 working_directory: PathBuf::from("/tmp"),
+                application_scope: None,
             }
         );
+    }
+
+    #[test]
+    fn transient_application_scope_uses_direct_restart_with_an_explanation() {
+        let mut process = owned_process();
+        process.cgroups = vec![
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.chromium.Chromium-2031.scope"
+                .to_owned(),
+        ];
+
+        let source = resolve_restart_source(&process);
+
+        assert!(matches!(
+            &source,
+            RestartSource::Direct {
+                application_scope: Some(scope),
+                ..
+            } if scope == "app-org.chromium.Chromium-2031.scope"
+        ));
+        assert!(source.summary().contains("cannot be started by systemd"));
     }
 
     #[test]
