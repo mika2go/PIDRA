@@ -54,6 +54,8 @@ process is a zombie, or it is blocked in kernel state `D`.
 14. Tests must never signal unrelated processes on the user's desktop.
 15. Restore the terminal on normal exit, error, panic and handled termination.
 16. Keep backend logic independent from Ratatui rendering.
+17. The optional developer/server layer is current-user only. It must exclude
+    protected system/session targets before they become visible.
 
 ## 3. MVP scope
 
@@ -66,6 +68,9 @@ process is a zombie, or it is blocked in kernel state `D`.
 - show only confirmed or probable graphical application roots in the main
   table while retaining all processes internally for relationships and safety
   analysis;
+- provide a keyboard-expandable developer/server table for current-user
+  background processes backed by a TCP listener or an explicit dev-server
+  command;
 - show process name, PID and resident memory (RSS) in the main table;
 - show Restart, Stop and Details actions in each row;
 - mark Restart unavailable with `--` when no safe restart source exists;
@@ -95,7 +100,8 @@ process is a zombie, or it is blocked in kernel state `D`.
 - controlling processes owned by another user;
 - Polkit helper;
 - GPU usage;
-- socket and port inspection;
+- general socket/traffic inspection beyond the listening endpoint used for
+  developer/server classification;
 - changing nice or I/O priority;
 - cgroup resource limits;
 - remote-machine management;
@@ -464,6 +470,24 @@ enough to classify a process as a GUI application.
 Full command arguments must be masked by default using conservative patterns
 for tokens, passwords, authorization headers and obvious secrets.
 
+## 9.2 Developer/server classification
+
+The developer/server table is a separate layer reached with `V`; it never
+changes the GUI-only default table. Name-only guesses are not accepted.
+
+A candidate must be owned by the current user, have an executable, pass the
+normal protected-target policy, and provide at least one of these signals:
+
+1. the process owns an inode currently listed as `LISTEN` in `/proc/net/tcp`
+   or `/proc/net/tcp6`;
+2. its argument vector is an explicit, recognized developer-server invocation
+   such as `python -m http.server`, `manage.py runserver` or `npm run dev`.
+
+PID 1, PIDRA and its ancestors, other-user processes, graphical roots, display
+servers, session managers, IPC/audio infrastructure and known desktop clients
+remain outside this layer. Details show the exact classification evidence and
+the existing termination analysis before stronger actions are available.
+
 ## 10. Process control
 
 ### Identity validation
@@ -721,6 +745,23 @@ Acceptance:
 - refresh does not jump away from the selected identity;
 - 10,000 fixture processes remain navigable.
 
+### Phase 2.5 — Developer/server layer
+
+Deliver:
+
+- TCP/TCP6 listening-inode discovery with disappearing-file tolerance;
+- conservative dev-command recognition without name-only classification;
+- a `V`-toggleable table using the same search, action and identity model;
+- developer/server evidence in Details;
+- a second protected-target filter before any candidate is shown.
+
+Acceptance:
+
+- other-user and essential session processes never enter the layer;
+- a process with only a developer-looking name is not enough;
+- Stop still means identity-validated `SIGTERM` with no automatic escalation;
+- tests never signal an unrelated real process.
+
 ### Phase 3 — Details and process relationships
 
 Deliver:
@@ -731,7 +772,7 @@ Deliver:
 - parent and children;
 - executable, cwd and masked command;
 - cgroup display;
-- navigation back to table.
+- navigation back to table;
 - expandable recursive subprocess tree;
 - per-node termination risk assessment with evidence and confidence.
 
@@ -908,6 +949,8 @@ PIDRA 1.0 is complete when:
   detected graphical application roots;
 - background and helper processes are hidden from the main table but available
   through an expandable Details tree;
+- developer/server processes are available in a separate evidence-backed layer
+  without exposing protected system/session targets;
 - every termination assessment states evidence and uncertainty instead of
   promising that closing a process is harmless;
 - every action is reachable using only arrow keys and Enter;

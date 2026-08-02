@@ -7,18 +7,22 @@ PIDRA is a small Linux TUI for answering two questions:
 1. Which desktop app is using all that memory?
 2. What actually happened after I tried to stop it?
 
-It deliberately shows GUI applications in the main list instead of dumping
-every process on the machine. Open **Details** when you need the full child
-process tree, command, cgroup, resource usage or PIDRA's close-risk notes.
+The first screen stays focused on GUI applications instead of dumping every
+process on the machine. Press `V` for a separate developer/server list. That
+list only accepts current-user processes with a TCP listening socket or an
+explicit dev-server command; protected session and system targets stay out.
+
+Open **Details** for the full child process tree, command, cgroup, resource
+usage, the reason a process was classified and PIDRA's close-risk notes.
 
 ```text
-PIDRA                         6 GUI PROCESSES              CPU 18  MEM 35
+PIDRA                       6 GUI  [V] 2 DEV               CPU 18  MEM 35
 
 PROCESS NAME                    ID       SIZE      RESTART   STOP   DETAILS
 >spotify                       2031     447 MB       [R]      [S]      [D]
  zen                         128870     998 MB       [R]      [S]      [D]
 
-UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP
+V DEV  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY
 ```
 
 ## Install
@@ -49,6 +53,7 @@ link the binary into `~/.local/bin`.
 | `Enter` | Run the selected action |
 | `/` | Search by name or PID |
 | `R`, `S`, `D` | Focus Restart, Stop or Details |
+| `V` | Toggle the developer/server process list |
 | `F`, `T` | Freeze/resume or send SIGTERM in Details |
 | `Shift+K` | Open the Force Stop confirmation |
 | `H` | Show this session's action history |
@@ -67,6 +72,9 @@ This keeps an accidental click from stopping an application.
   rejected.
 - PID 1, PIDRA itself, its parent chain and essential desktop-session processes
   are blocked.
+- The developer/server list is current-user only. A process needs a real TCP
+  listener or a recognized dev command, and protected targets are filtered a
+  second time by the normal termination analysis.
 - A green-looking risk assessment is not a promise. An application can still
   lose unsaved work.
 - Restart uses a real systemd user service when one exists. Transient app
