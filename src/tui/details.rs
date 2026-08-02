@@ -38,6 +38,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     let root_classification = app
         .details_root
         .and_then(|identity| app.gui_classifications.get(&identity));
+    let developer_classification = app.developer_classifications.get(&process.identity);
     let risk = assess_termination(
         process,
         &app.all_processes,
@@ -133,25 +134,45 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         format_rate(process.read_rate_bytes),
         format_rate(process.write_rate_bytes)
     )));
-    lines.push(Line::styled("GUI CLASSIFICATION", palette.table_header()));
-    lines.push(Line::from(root_classification.map_or_else(
-        || "UNCLASSIFIED — no GUI evidence for this child node".to_owned(),
-        |classification| {
-            format!(
-                "{:?}   {}",
-                classification.confidence,
-                classification
-                    .application_scope
-                    .as_deref()
-                    .unwrap_or("no systemd app scope")
-            )
-        },
-    )));
-    if let Some(classification) = root_classification {
+    if let Some(classification) = developer_classification {
+        lines.push(Line::styled(
+            "DEVELOPER / SERVER EVIDENCE",
+            palette.table_header(),
+        ));
+        lines.push(Line::from(format!(
+            "{}   {}",
+            classification.kind.label(),
+            if classification.endpoints.is_empty() {
+                "no listening endpoint observed".to_owned()
+            } else {
+                classification.endpoints.join(", ")
+            }
+        )));
         lines.push(Line::from(format!(
             "EVIDENCE    {}",
             classification.evidence.join("; ")
         )));
+    } else {
+        lines.push(Line::styled("GUI CLASSIFICATION", palette.table_header()));
+        lines.push(Line::from(root_classification.map_or_else(
+            || "UNCLASSIFIED — no GUI evidence for this child node".to_owned(),
+            |classification| {
+                format!(
+                    "{:?}   {}",
+                    classification.confidence,
+                    classification
+                        .application_scope
+                        .as_deref()
+                        .unwrap_or("no systemd app scope")
+                )
+            },
+        )));
+        if let Some(classification) = root_classification {
+            lines.push(Line::from(format!(
+                "EVIDENCE    {}",
+                classification.evidence.join("; ")
+            )));
+        }
     }
     lines.push(Line::from(format!(
         "RESTART     {}",

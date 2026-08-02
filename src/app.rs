@@ -6,7 +6,8 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::process::{
-    GuiClassification, GuiConfidence, ProcessIdentity, ProcessSnapshot, ScanBatch,
+    DeveloperClassification, GuiClassification, GuiConfidence, ProcessIdentity, ProcessSnapshot,
+    ScanBatch,
     cpu::SystemMetrics,
     tree::{ProcessTree, TreeNode},
 };
@@ -24,6 +25,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
     Table,
+    Developer,
     Details,
     Confirm,
     RestartConfirm,
@@ -91,6 +93,7 @@ pub struct App {
     pub processes: Vec<ProcessSnapshot>,
     pub all_processes: Vec<ProcessSnapshot>,
     pub gui_classifications: HashMap<ProcessIdentity, GuiClassification>,
+    pub developer_classifications: HashMap<ProcessIdentity, DeveloperClassification>,
     pub system_metrics: SystemMetrics,
     pub selected: usize,
     pub focus: FocusColumn,
@@ -113,12 +116,23 @@ pub struct App {
     queued_diagnosis: HashMap<(ProcessIdentity, SignalAction), DiagnosisContext>,
     pending_observation: HashMap<ProcessIdentity, PendingObservation>,
     pub latest_actions: HashMap<ProcessIdentity, String>,
+    table_view: AppView,
 }
 
 impl App {
     #[must_use]
     pub fn graphical_total(&self) -> usize {
         self.gui_classifications.len()
+    }
+
+    #[must_use]
+    pub fn developer_total(&self) -> usize {
+        self.developer_classifications.len()
+    }
+
+    #[must_use]
+    pub fn developer_layer_active(&self) -> bool {
+        self.table_view == AppView::Developer
     }
 
     #[must_use]
@@ -137,6 +151,7 @@ impl App {
             processes: Vec::new(),
             all_processes: Vec::new(),
             gui_classifications: HashMap::new(),
+            developer_classifications: HashMap::new(),
             system_metrics: SystemMetrics::default(),
             selected: 0,
             focus: FocusColumn::Restart,
@@ -159,6 +174,7 @@ impl App {
             queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
+            table_view: AppView::Table,
         }
     }
 
@@ -190,6 +206,7 @@ impl App {
             all_processes: processes.clone(),
             processes,
             gui_classifications,
+            developer_classifications: HashMap::new(),
             system_metrics: SystemMetrics::default(),
             selected: 0,
             focus: FocusColumn::Restart,
@@ -212,6 +229,7 @@ impl App {
             queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
+            table_view: AppView::Table,
         }
     }
 
@@ -230,6 +248,21 @@ impl App {
             .into_iter()
             .map(|classification| (classification.identity, classification))
             .collect();
+        let pidra_pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        self.developer_classifications = batch
+            .developer
+            .into_iter()
+            .filter(|classification| {
+                self.all_processes
+                    .iter()
+                    .find(|process| process.identity == classification.identity)
+                    .is_some_and(|process| {
+                        assess_termination(process, &self.all_processes, pidra_pid).rating
+                            != crate::control::risk::RiskRating::Protected
+                    })
+            })
+            .map(|classification| (classification.identity, classification))
+            .collect();
         self.open_requested_pid();
         self.rebuild_visible(selected_identity);
         self.observe_pending_actions();
@@ -239,12 +272,10 @@ impl App {
                 .is_some_and(|identity| self.process_by_identity(identity).is_none());
         if details_missing {
             self.status = "The detailed process identity no longer exists".to_owned();
-        } else if self.view == AppView::Table && replace_with_scan_summary {
-            self.status = format!(
-                "Showing {} GUI processes from {} scanned processes",
-                self.processes.len(),
-                self.all_processes.len()
-            );
+        } else if matches!(self.view, AppView::Table | AppView::Developer)
+            && replace_with_scan_summary
+        {
+            self.status = self.scan_summary();
         }
         self.clamp_details_selection();
     }
@@ -279,7 +310,14 @@ impl App {
         let mut processes: Vec<_> = self
             .all_processes
             .iter()
-            .filter(|process| self.gui_classifications.contains_key(&process.identity))
+            .filter(|process| {
+                if self.table_view == AppView::Developer {
+                    self.developer_classifications
+                        .contains_key(&process.identity)
+                } else {
+                    self.gui_classifications.contains_key(&process.identity)
+                }
+            })
             .filter(|process| {
                 query.is_empty()
                     || process.name.to_lowercase().contains(&query)
@@ -299,6 +337,37 @@ impl App {
         self.selected = selected_identity
             .and_then(|identity| self.index_of(identity))
             .unwrap_or_else(|| previous_index.min(self.processes.len().saturating_sub(1)));
+    }
+
+    fn scan_summary(&self) -> String {
+        if self.table_view == AppView::Developer {
+            format!(
+                "Showing {} current-user developer/server processes; protected targets are excluded",
+                self.processes.len()
+            )
+        } else {
+            format!(
+                "Showing {} GUI processes from {} scanned processes",
+                self.processes.len(),
+                self.all_processes.len()
+            )
+        }
+    }
+
+    fn toggle_developer_layer(&mut self) {
+        let selected_identity = self
+            .processes
+            .get(self.selected)
+            .map(|process| process.identity);
+        self.table_view = if self.table_view == AppView::Developer {
+            AppView::Table
+        } else {
+            AppView::Developer
+        };
+        self.view = self.table_view;
+        self.selected = 0;
+        self.rebuild_visible(selected_identity);
+        self.status = self.scan_summary();
     }
 
     pub fn report_scan_error(&mut self, error: &str) {
@@ -349,10 +418,11 @@ impl App {
                 self.handle_help_key(key);
                 return;
             }
-            AppView::Table => {}
+            AppView::Table | AppView::Developer => {}
         }
 
         match key.code {
+            KeyCode::Esc if self.view == AppView::Developer => self.toggle_developer_layer(),
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
             KeyCode::Left => self.focus = self.focus.previous(),
@@ -362,8 +432,9 @@ impl App {
             KeyCode::Char('d' | 'D') => self.focus = FocusColumn::Details,
             KeyCode::Enter => self.activate_focused_action(),
             KeyCode::Char('/') => self.searching = true,
-            KeyCode::Char('h' | 'H') => self.open_history(AppView::Table),
-            KeyCode::Char('?') => self.open_help(AppView::Table),
+            KeyCode::Char('v' | 'V') => self.toggle_developer_layer(),
+            KeyCode::Char('h' | 'H') => self.open_history(self.table_view),
+            KeyCode::Char('?') => self.open_help(self.table_view),
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
             _ => {}
         }
@@ -372,8 +443,12 @@ impl App {
     fn handle_details_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.view = AppView::Table;
-                self.status = "Returned to GUI process table".to_owned();
+                self.view = self.table_view;
+                self.status = if self.table_view == AppView::Developer {
+                    "Returned to developer/server process layer".to_owned()
+                } else {
+                    "Returned to GUI process table".to_owned()
+                };
             }
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
             KeyCode::Up => self.details_selected = self.details_selected.saturating_sub(1),
@@ -583,7 +658,7 @@ impl App {
 
         match self.focus {
             FocusColumn::Restart => {
-                self.open_restart_confirmation(&process, AppView::Table);
+                self.open_restart_confirmation(&process, self.table_view);
             }
             FocusColumn::Stop => {
                 self.queue_action(&process, SignalAction::Stop);
@@ -910,7 +985,8 @@ mod tests {
 
     use crate::control::{ControlOutcome, ControlResult, SignalAction};
     use crate::process::{
-        GuiClassification, GuiConfidence, ProcessSnapshot, ScanBatch, cpu::SystemMetrics,
+        DeveloperClassification, DeveloperKind, GuiClassification, GuiConfidence, ProcessSnapshot,
+        ScanBatch, cpu::SystemMetrics,
     };
 
     use super::{App, AppView, FocusColumn};
@@ -996,6 +1072,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: refreshed,
             graphical,
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 
@@ -1022,6 +1099,78 @@ mod tests {
     }
 
     #[test]
+    fn developer_layer_shows_only_safe_classified_developer_processes() {
+        let mut gui = ProcessSnapshot::fixture("firefox", 301, 100);
+        gui.uid = rustix::process::getuid().as_raw();
+        gui.executable = Some(PathBuf::from("/usr/bin/firefox"));
+        let mut server = ProcessSnapshot::fixture("vite", 302, 50);
+        server.uid = rustix::process::getuid().as_raw();
+        server.executable = Some(PathBuf::from("/usr/bin/node"));
+        let graphical = vec![GuiClassification {
+            identity: gui.identity,
+            confidence: GuiConfidence::Confirmed,
+            display_name: None,
+            application_scope: None,
+            evidence: vec!["window".to_owned()],
+        }];
+        let developer = vec![DeveloperClassification {
+            identity: server.identity,
+            kind: DeveloperKind::ListeningServer,
+            endpoints: vec!["TCP port 5173".to_owned()],
+            evidence: vec!["owns a listener".to_owned()],
+        }];
+        let mut app = App::new();
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![gui, server],
+            graphical,
+            developer,
+            system: SystemMetrics::default(),
+        });
+
+        assert_eq!(app.processes.len(), 1);
+        assert_eq!(app.processes[0].name, "firefox");
+        app.handle_key(key(KeyCode::Char('v')));
+        assert_eq!(app.view, AppView::Developer);
+        assert_eq!(app.processes.len(), 1);
+        assert_eq!(app.processes[0].name, "vite");
+        assert!(app.status.contains("protected targets are excluded"));
+
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view, AppView::Table);
+        assert_eq!(app.processes[0].name, "firefox");
+    }
+
+    #[test]
+    fn developer_layer_actions_keep_the_exact_process_identity() {
+        let mut server = ProcessSnapshot::fixture("uvicorn", 303, 50);
+        server.uid = rustix::process::getuid().as_raw();
+        server.executable = Some(PathBuf::from("/usr/bin/uvicorn"));
+        let expected = server.identity;
+        let developer = vec![DeveloperClassification {
+            identity: expected,
+            kind: DeveloperKind::ListeningServer,
+            endpoints: vec!["TCP port 8000".to_owned()],
+            evidence: vec!["owns a listener".to_owned()],
+        }];
+        let mut app = App::new();
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![server],
+            graphical: Vec::new(),
+            developer,
+            system: SystemMetrics::default(),
+        });
+        app.handle_key(key(KeyCode::Char('v')));
+        app.focus = FocusColumn::Stop;
+
+        app.handle_key(key(KeyCode::Enter));
+
+        let requests: Vec<_> = app.take_control_requests().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].identity, expected);
+        assert_eq!(requests[0].action, SignalAction::Stop);
+    }
+
+    #[test]
     fn ten_thousand_processes_remain_navigable() {
         let processes: Vec<_> = (1..=10_000)
             .map(|pid| ProcessSnapshot::fixture(&format!("app-{pid}"), pid, pid as u64))
@@ -1040,6 +1189,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes,
             graphical,
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 
@@ -1247,6 +1397,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: vec![replacement.clone()],
             graphical: Vec::new(),
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 
@@ -1272,6 +1423,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: vec![child.clone()],
             graphical: Vec::new(),
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 
@@ -1307,6 +1459,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: fixture.all_processes,
             graphical,
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 
@@ -1343,6 +1496,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: app.all_processes.clone(),
             graphical,
+            developer: Vec::new(),
             system: SystemMetrics::default(),
         });
 

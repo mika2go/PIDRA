@@ -1,4 +1,5 @@
 pub mod cpu;
+pub mod developer;
 pub mod format;
 pub mod gui;
 mod identity;
@@ -7,6 +8,7 @@ mod snapshot;
 pub mod tree;
 mod worker;
 
+pub use developer::{DeveloperClassification, DeveloperKind};
 pub use gui::{GuiClassification, GuiConfidence, WindowHint};
 pub use identity::{ProcessIdentity, ProcessState};
 pub use snapshot::ProcessSnapshot;

@@ -6,11 +6,14 @@ pub fn render(frame: &mut Frame<'_>, options: RenderOptions) {
     let palette = Palette::new(options.no_color);
     let lines = vec![
         Line::styled("PIDRA HELP", palette.header()),
-        Line::from("Keyboard-first Linux process control for detected GUI application roots."),
+        Line::from(
+            "Keyboard-first Linux process control for GUI apps and filtered developer servers.",
+        ),
         Line::from(""),
         Line::styled("TABLE", palette.table_header()),
         Line::from("Up/Down row   Left/Right action   Enter use   / search"),
         Line::from("R restart column   S stop column   D details column"),
+        Line::from("V toggle the developer/server layer; Esc returns from it to GUI apps"),
         Line::from("H session history   ? help   Q quit"),
         Line::from(""),
         Line::styled("DETAILS", palette.table_header()),
@@ -24,6 +27,9 @@ pub fn render(frame: &mut Frame<'_>, options: RenderOptions) {
         Line::from("Analysis is advisory: closing software can still lose unsaved user data."),
         Line::from(
             "PID 1, PIDRA, its ancestors and essential graphical-session services are protected.",
+        ),
+        Line::from(
+            "Developer entries require a TCP listener or explicit dev command and current-user ownership.",
         ),
         Line::from(""),
         Line::styled("ESC / ? BACK     Q QUIT", palette.footer()),

@@ -49,7 +49,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             help::render(frame, options);
             return;
         }
-        AppView::Table => {}
+        AppView::Table | AppView::Developer => {}
     }
     let areas = layout::areas(frame.area());
     let palette = theme::Palette::new(options.no_color);
@@ -66,8 +66,23 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         Paragraph::new("PIDRA").style(palette.header()),
         header_columns[0],
     );
-    let count = if app.search_query.is_empty() {
-        format!("{} GUI PROCESSES", app.graphical_total())
+    let count = if app.developer_layer_active() {
+        if app.search_query.is_empty() {
+            format!("DEV / SERVER {}  [V] GUI", app.developer_total())
+        } else {
+            format!(
+                "{} / {} DEV  /{}",
+                app.processes.len(),
+                app.developer_total(),
+                app.search_query
+            )
+        }
+    } else if app.search_query.is_empty() {
+        format!(
+            "{} GUI  [V] {} DEV",
+            app.graphical_total(),
+            app.developer_total()
+        )
     } else {
         format!(
             "{} / {} GUI  /{}",
@@ -107,9 +122,17 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             "SEARCH: TYPE NAME OR PID   ⌫ DELETE   ENTER/ESC CLOSE"
         }
     } else if options.ascii {
-        "UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        if app.developer_layer_active() {
+            "V/ESC GUI  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        } else {
+            "V DEV  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        }
     } else {
-        "↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        if app.developer_layer_active() {
+            "V/ESC GUI  ↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        } else {
+            "V DEV  ↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+        }
     };
     frame.render_widget(Paragraph::new(footer).style(palette.footer()), areas.footer);
 }
@@ -120,7 +143,7 @@ fn percent(value: Option<f32>) -> String {
 
 #[must_use]
 pub fn table_hit(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Option<TableHit> {
-    if app.view != AppView::Table {
+    if !matches!(app.view, AppView::Table | AppView::Developer) {
         return None;
     }
     let areas = layout::areas(area);
@@ -135,7 +158,12 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{App, AppView, FocusColumn};
+    use crate::{
+        app::{App, AppView, FocusColumn},
+        process::{
+            DeveloperClassification, DeveloperKind, ProcessSnapshot, ScanBatch, cpu::SystemMetrics,
+        },
+    };
 
     use super::{RenderOptions, render};
 
@@ -188,6 +216,64 @@ mod tests {
         assert!(rendered.contains("PIDRA"));
         assert!(rendered.contains("PROCESS NAME"));
         assert!(rendered.contains(">nira"));
+    }
+
+    #[test]
+    fn developer_layer_and_details_show_the_classification_evidence() {
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut server = ProcessSnapshot::fixture("vite", 5173, 32_000_000);
+        server.uid = rustix::process::getuid().as_raw();
+        server.executable = Some(PathBuf::from("/usr/bin/node"));
+        let developer = vec![DeveloperClassification {
+            identity: server.identity,
+            kind: DeveloperKind::ListeningServer,
+            endpoints: vec!["TCP port 5173".to_owned()],
+            evidence: vec!["owns 1 TCP listening socket".to_owned()],
+        }];
+        let mut app = App::new();
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![server],
+            graphical: Vec::new(),
+            developer,
+            system: SystemMetrics::default(),
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render developer layer");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("DEV / SERVER 1"));
+        assert!(rendered.contains("vite"));
+        assert!(rendered.contains("protected targets are excluded"));
+
+        app.focus = FocusColumn::Details;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render developer details");
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("DEVELOPER / SERVER EVIDENCE"));
+        assert!(rendered.contains("TCP port 5173"));
     }
 
     #[test]

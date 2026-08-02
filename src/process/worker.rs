@@ -6,8 +6,9 @@ use std::{
 };
 
 use super::{
-    GuiClassification, ProcessSnapshot,
+    DeveloperClassification, GuiClassification, ProcessSnapshot,
     cpu::{DeltaTracker, SystemMetrics},
+    developer::classify_developer_processes,
     gui::{classify_gui_processes, discover_window_hints},
     procfs,
 };
@@ -16,6 +17,7 @@ use super::{
 pub struct ScanBatch {
     pub processes: Vec<ProcessSnapshot>,
     pub graphical: Vec<GuiClassification>,
+    pub developer: Vec<DeveloperClassification>,
     pub system: SystemMetrics,
 }
 
@@ -64,9 +66,12 @@ impl ScanWorker {
                                 Vec::new()
                             };
                             let graphical = classify_gui_processes(&processes, &window_hints);
+                            let developer =
+                                classify_developer_processes(&root, &processes, &graphical);
                             ScanBatch {
                                 processes,
                                 graphical,
+                                developer,
                                 system,
                             }
                         })
