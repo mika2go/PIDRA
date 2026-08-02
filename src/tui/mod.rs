@@ -1,3 +1,4 @@
+mod details;
 mod layout;
 mod process_table;
 mod theme;
@@ -8,7 +9,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, FocusColumn};
+use crate::app::{App, AppView, FocusColumn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TableHit {
@@ -23,6 +24,10 @@ pub struct RenderOptions {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
+    if app.view == AppView::Details {
+        details::render(frame, app, options);
+        return;
+    }
     let areas = layout::areas(frame.area());
     let palette = theme::Palette::new(options.no_color);
 
@@ -54,8 +59,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             .style(palette.header()),
         header_columns[1],
     );
+    let system = format!(
+        "CPU {}  MEM {}",
+        percent(app.system_metrics.cpu_percent),
+        percent(app.system_metrics.memory_used_percent)
+    );
     frame.render_widget(
-        Paragraph::new("CPU --  MEM --")
+        Paragraph::new(system)
             .alignment(Alignment::Right)
             .style(palette.header()),
         header_columns[2],
@@ -81,6 +91,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     frame.render_widget(Paragraph::new(footer).style(palette.footer()), areas.footer);
 }
 
+fn percent(value: Option<f32>) -> String {
+    value.map_or_else(|| "--".to_owned(), |value| format!("{value:02.0}"))
+}
+
 #[must_use]
 pub fn table_hit(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Option<TableHit> {
     let areas = layout::areas(area);
@@ -91,7 +105,9 @@ pub fn table_hit(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Opti
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::app::App;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use crate::app::{App, FocusColumn};
 
     use super::{RenderOptions, render};
 
@@ -144,5 +160,34 @@ mod tests {
         assert!(rendered.contains("PIDRA"));
         assert!(rendered.contains("PROCESS NAME"));
         assert!(rendered.contains(">nira"));
+    }
+
+    #[test]
+    fn details_replace_the_table_and_show_risk_analysis() {
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        app.all_processes[0].executable = Some("/usr/bin/nira".into());
+        app.focus = FocusColumn::Details;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render details");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("PROCESS TREE"));
+        assert!(rendered.contains("TERMINATION ANALYSIS"));
+        assert!(rendered.contains("CLOSE FROM APPLICATION FIRST"));
+        assert!(!rendered.contains("PROCESS NAME"));
     }
 }

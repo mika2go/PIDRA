@@ -182,7 +182,7 @@ fn action_cell<'a>(label: &'a str, focused: bool, palette: &Palette) -> Cell<'a>
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;

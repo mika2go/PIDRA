@@ -1,10 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::process::{
     GuiClassification, GuiConfidence, ProcessIdentity, ProcessSnapshot, ScanBatch,
+    cpu::SystemMetrics,
+    tree::{ProcessTree, TreeNode},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppView {
+    Table,
+    Details,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusColumn {
@@ -36,12 +44,17 @@ pub struct App {
     pub processes: Vec<ProcessSnapshot>,
     pub all_processes: Vec<ProcessSnapshot>,
     pub gui_classifications: HashMap<ProcessIdentity, GuiClassification>,
+    pub system_metrics: SystemMetrics,
     pub selected: usize,
     pub focus: FocusColumn,
     pub status: String,
     pub should_quit: bool,
     pub searching: bool,
     pub search_query: String,
+    pub view: AppView,
+    pub details_root: Option<ProcessIdentity>,
+    pub details_selected: usize,
+    pub expanded_nodes: HashSet<ProcessIdentity>,
 }
 
 impl App {
@@ -56,12 +69,17 @@ impl App {
             processes: Vec::new(),
             all_processes: Vec::new(),
             gui_classifications: HashMap::new(),
+            system_metrics: SystemMetrics::default(),
             selected: 0,
             focus: FocusColumn::Restart,
             status: "Scanning /proc…".to_owned(),
             should_quit: false,
             searching: false,
             search_query: String::new(),
+            view: AppView::Table,
+            details_root: None,
+            details_selected: 0,
+            expanded_nodes: HashSet::new(),
         }
     }
 
@@ -93,12 +111,17 @@ impl App {
             all_processes: processes.clone(),
             processes,
             gui_classifications,
+            system_metrics: SystemMetrics::default(),
             selected: 0,
             focus: FocusColumn::Restart,
             status: "Phase 0 fixture — no real process actions are enabled".to_owned(),
             should_quit: false,
             searching: false,
             search_query: String::new(),
+            view: AppView::Table,
+            details_root: None,
+            details_selected: 0,
+            expanded_nodes: HashSet::new(),
         }
     }
 
@@ -108,17 +131,26 @@ impl App {
             .get(self.selected)
             .map(|process| process.identity);
         self.all_processes = batch.processes;
+        self.system_metrics = batch.system;
         self.gui_classifications = batch
             .graphical
             .into_iter()
             .map(|classification| (classification.identity, classification))
             .collect();
         self.rebuild_visible(selected_identity);
-        self.status = format!(
-            "Showing {} GUI processes from {} scanned processes",
-            self.processes.len(),
-            self.all_processes.len()
-        );
+        let details_missing = self
+            .details_root
+            .is_some_and(|identity| self.process_by_identity(identity).is_none());
+        if details_missing {
+            self.status = "The detailed process identity no longer exists".to_owned();
+        } else if self.view == AppView::Table {
+            self.status = format!(
+                "Showing {} GUI processes from {} scanned processes",
+                self.processes.len(),
+                self.all_processes.len()
+            );
+        }
+        self.clamp_details_selection();
     }
 
     fn rebuild_visible(&mut self, selected_identity: Option<ProcessIdentity>) {
@@ -176,6 +208,11 @@ impl App {
             return;
         }
 
+        if self.view == AppView::Details {
+            self.handle_details_key(key);
+            return;
+        }
+
         match key.code {
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
@@ -184,9 +221,34 @@ impl App {
             KeyCode::Char('r' | 'R') => self.focus = FocusColumn::Restart,
             KeyCode::Char('s' | 'S') => self.focus = FocusColumn::Stop,
             KeyCode::Char('d' | 'D') => self.focus = FocusColumn::Details,
-            KeyCode::Enter => self.activate_fixture_action(),
+            KeyCode::Enter => self.activate_focused_action(),
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn handle_details_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.view = AppView::Table;
+                self.status = "Returned to GUI process table".to_owned();
+            }
+            KeyCode::Char('q' | 'Q') => self.should_quit = true,
+            KeyCode::Up => self.details_selected = self.details_selected.saturating_sub(1),
+            KeyCode::Down => {
+                let node_count = self.detail_nodes().len();
+                if self.details_selected + 1 < node_count {
+                    self.details_selected += 1;
+                }
+            }
+            KeyCode::Right | KeyCode::Enter => self.expand_selected_detail_node(),
+            KeyCode::Left => self.collapse_or_select_parent(),
+            KeyCode::Char('f' | 'F' | 't' | 'T' | 'k' | 'K') => {
+                self.status =
+                    "Process actions remain disabled until Phase 4 identity-safe signalling"
+                        .to_owned();
+            }
             _ => {}
         }
     }
@@ -243,34 +305,97 @@ impl App {
         if let Some(column) = focus {
             self.focus = column;
             if was_selected && was_focused {
-                self.activate_fixture_action();
+                self.activate_focused_action();
             }
         }
     }
 
-    fn activate_fixture_action(&mut self) {
-        let Some(process) = self.processes.get(self.selected) else {
+    fn activate_focused_action(&mut self) {
+        let Some(process) = self.processes.get(self.selected).cloned() else {
             return;
         };
 
-        self.status = match self.focus {
-            FocusColumn::Restart => format!(
-                "Restart unavailable for {} ({}) until Phase 5",
-                process.name, process.identity.pid
-            ),
+        match self.focus {
+            FocusColumn::Restart => {
+                self.status = format!(
+                    "Restart unavailable for {} ({}) until Phase 5",
+                    process.name, process.identity.pid
+                );
+            }
             FocusColumn::Stop => {
-                format!(
+                self.status = format!(
                     "Stop disabled for {} ({}) until safe signalling is implemented",
                     process.name, process.identity.pid
-                )
+                );
             }
             FocusColumn::Details => {
-                format!(
-                    "Details for {} ({}) arrive in Phase 3",
-                    process.name, process.identity.pid
-                )
+                self.view = AppView::Details;
+                self.details_root = Some(process.identity);
+                self.details_selected = 0;
+                self.expanded_nodes.clear();
+                self.expanded_nodes.insert(process.identity);
+                self.status = format!("Inspecting {} ({})", process.name, process.identity.pid);
             }
+        }
+    }
+
+    #[must_use]
+    pub fn detail_nodes(&self) -> Vec<TreeNode> {
+        let Some(root) = self.details_root else {
+            return Vec::new();
         };
+        ProcessTree::new(&self.all_processes).visible_nodes(root, &self.expanded_nodes)
+    }
+
+    #[must_use]
+    pub fn selected_detail_process(&self) -> Option<&ProcessSnapshot> {
+        let node = self.detail_nodes().get(self.details_selected).copied()?;
+        self.process_by_identity(node.identity)
+    }
+
+    #[must_use]
+    pub fn process_by_identity(&self, identity: ProcessIdentity) -> Option<&ProcessSnapshot> {
+        self.all_processes
+            .iter()
+            .find(|process| process.identity == identity)
+    }
+
+    fn expand_selected_detail_node(&mut self) {
+        let Some(node) = self.detail_nodes().get(self.details_selected).copied() else {
+            return;
+        };
+        if node.has_children {
+            self.expanded_nodes.insert(node.identity);
+        } else {
+            self.status = "Selected process has no child processes".to_owned();
+        }
+    }
+
+    fn collapse_or_select_parent(&mut self) {
+        let nodes = self.detail_nodes();
+        let Some(node) = nodes.get(self.details_selected).copied() else {
+            return;
+        };
+        if node.expanded && node.has_children {
+            self.expanded_nodes.remove(&node.identity);
+            self.clamp_details_selection();
+            return;
+        }
+        if node.depth == 0 {
+            return;
+        }
+        if let Some(parent_index) = nodes[..self.details_selected]
+            .iter()
+            .rposition(|candidate| candidate.depth < node.depth)
+        {
+            self.details_selected = parent_index;
+        }
+    }
+
+    fn clamp_details_selection(&mut self) {
+        self.details_selected = self
+            .details_selected
+            .min(self.detail_nodes().len().saturating_sub(1));
     }
 }
 
@@ -284,9 +409,11 @@ impl Default for App {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::process::{GuiClassification, GuiConfidence, ProcessSnapshot, ScanBatch};
+    use crate::process::{
+        GuiClassification, GuiConfidence, ProcessSnapshot, ScanBatch, cpu::SystemMetrics,
+    };
 
-    use super::{App, FocusColumn};
+    use super::{App, AppView, FocusColumn};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -351,6 +478,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes: refreshed,
             graphical,
+            system: SystemMetrics::default(),
         });
 
         assert_eq!(app.processes[app.selected].identity, selected_identity);
@@ -394,6 +522,7 @@ mod tests {
         app.apply_scan_batch(ScanBatch {
             processes,
             graphical,
+            system: SystemMetrics::default(),
         });
 
         for _ in 0..9_999 {
@@ -409,9 +538,32 @@ mod tests {
         let mut app = App::fixture();
 
         app.select_from_pointer(0, Some(FocusColumn::Details));
-        assert!(!app.status.contains("Details for"));
+        assert_eq!(app.view, AppView::Table);
         app.select_from_pointer(0, Some(FocusColumn::Details));
 
-        assert!(app.status.contains("Details for nira"));
+        assert_eq!(app.view, AppView::Details);
+        assert!(app.status.contains("Inspecting nira"));
+    }
+
+    #[test]
+    fn details_expand_children_and_return_to_table() {
+        let mut app = App::fixture();
+        let mut child = ProcessSnapshot::fixture("renderer", 18_423, 512);
+        child.parent_pid = Some(18_422);
+        app.all_processes.push(child);
+        app.focus = FocusColumn::Details;
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.view, AppView::Details);
+        assert_eq!(app.detail_nodes().len(), 2);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.selected_detail_process().map(|p| p.name.as_str()),
+            Some("renderer")
+        );
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.details_selected, 0);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view, AppView::Table);
     }
 }

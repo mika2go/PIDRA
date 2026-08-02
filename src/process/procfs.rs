@@ -107,6 +107,8 @@ fn read_process(process_dir: &Path, directory_pid: i32, page_size: u64) -> Optio
         thread_count: stat.thread_count,
         read_bytes,
         write_bytes,
+        read_rate_bytes: None,
+        write_rate_bytes: None,
         cgroups: fs::read(process_dir.join("cgroup"))
             .ok()
             .map_or_else(Vec::new, |contents| parse_cgroups(&contents)),

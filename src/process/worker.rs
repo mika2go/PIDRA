@@ -7,6 +7,7 @@ use std::{
 
 use super::{
     GuiClassification, ProcessSnapshot,
+    cpu::{DeltaTracker, SystemMetrics},
     gui::{classify_gui_processes, discover_window_hints},
     procfs,
 };
@@ -15,6 +16,7 @@ use super::{
 pub struct ScanBatch {
     pub processes: Vec<ProcessSnapshot>,
     pub graphical: Vec<GuiClassification>,
+    pub system: SystemMetrics,
 }
 
 #[derive(Debug)]
@@ -51,9 +53,11 @@ impl ScanWorker {
         let thread = thread::Builder::new()
             .name("pidra-procfs-scanner".to_owned())
             .spawn(move || {
+                let mut delta_tracker = DeltaTracker::default();
                 loop {
                     let result = procfs::scan_procfs(&root)
-                        .map(|processes| {
+                        .map(|mut processes| {
+                            let system = delta_tracker.update(&root, &mut processes);
                             let window_hints = if detect_windows {
                                 discover_window_hints()
                             } else {
@@ -63,6 +67,7 @@ impl ScanWorker {
                             ScanBatch {
                                 processes,
                                 graphical,
+                                system,
                             }
                         })
                         .map_err(|error| error.to_string());

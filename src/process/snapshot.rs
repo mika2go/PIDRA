@@ -19,6 +19,8 @@ pub struct ProcessSnapshot {
     pub thread_count: u32,
     pub read_bytes: Option<u64>,
     pub write_bytes: Option<u64>,
+    pub read_rate_bytes: Option<f64>,
+    pub write_rate_bytes: Option<f64>,
     pub cgroups: Vec<String>,
 }
 
@@ -44,6 +46,8 @@ impl ProcessSnapshot {
             thread_count: 1,
             read_bytes: None,
             write_bytes: None,
+            read_rate_bytes: None,
+            write_rate_bytes: None,
             cgroups: Vec::new(),
         }
     }
