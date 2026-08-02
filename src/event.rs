@@ -3,13 +3,19 @@ use std::{io, time::Duration};
 use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use ratatui::{Terminal, backend::Backend, layout::Rect};
 
-use crate::{app::App, control::ControlWorker, process::ScanWorker, tui};
+use crate::{
+    app::App,
+    control::{ControlWorker, RestartWorker},
+    process::ScanWorker,
+    tui,
+};
 
 pub fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     scanner: &ScanWorker,
     control: &ControlWorker,
+    restart: &RestartWorker,
     options: tui::RenderOptions,
     refresh_interval: Duration,
 ) -> io::Result<()>
@@ -31,6 +37,16 @@ where
         }
         while let Some(result) = control.try_result() {
             app.apply_control_result(result);
+            dirty = true;
+        }
+        let restart_requests: Vec<_> = app.take_restart_requests().collect();
+        for request in restart_requests {
+            if let Err(error) = restart.request(request) {
+                app.report_restart_dispatch_error(&error);
+            }
+        }
+        while let Some(result) = restart.try_result() {
+            app.apply_restart_result(result);
             dirty = true;
         }
 

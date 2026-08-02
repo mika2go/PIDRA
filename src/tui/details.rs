@@ -179,9 +179,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     lines.push(Line::styled("ACTIONS", palette.table_header()));
     lines.push(Line::from(
         if process.state == crate::process::ProcessState::Stopped {
-            "F RESUME   T STOP   SHIFT+K FORCE STOP"
+            "R RESTART   F RESUME   T STOP   SHIFT+K FORCE STOP"
         } else {
-            "F FREEZE   T STOP   SHIFT+K FORCE STOP"
+            "R RESTART   F FREEZE   T STOP   SHIFT+K FORCE STOP"
         },
     ));
     lines.push(Line::from(

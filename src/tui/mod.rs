@@ -2,6 +2,7 @@ mod confirm;
 mod details;
 mod layout;
 mod process_table;
+mod restart_confirm;
 mod theme;
 
 use ratatui::{
@@ -32,6 +33,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         }
         AppView::Confirm => {
             confirm::render(frame, app, options);
+            return;
+        }
+        AppView::RestartConfirm => {
+            restart_confirm::render(frame, app, options);
             return;
         }
         AppView::Table => {}
@@ -114,6 +119,8 @@ pub fn table_hit(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Opti
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsString, path::PathBuf};
+
     use ratatui::{Terminal, backend::TestBackend};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -235,5 +242,40 @@ mod tests {
         assert!(rendered.contains("exact PID/start-time identity"));
         assert!(rendered.contains("SIGKILL gives the process no chance"));
         assert!(rendered.contains("ENTER / Y CONFIRM"));
+    }
+
+    #[test]
+    fn restart_confirmation_explains_direct_exec_limitations() {
+        let backend = TestBackend::new(110, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        let uid = rustix::process::getuid().as_raw();
+        app.processes[0].uid = uid;
+        app.processes[0].executable = Some(PathBuf::from("/usr/bin/sleep"));
+        app.processes[0].cwd = Some(PathBuf::from("/tmp"));
+        app.processes[0].command = vec![OsString::from("sleep"), OsString::from("30")];
+        app.all_processes[0] = app.processes[0].clone();
+        app.focus = FocusColumn::Restart;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.view, AppView::RestartConfirm);
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render restart confirmation");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("CONFIRM RESTART"));
+        assert!(rendered.contains("DIRECT EXEC"));
+        assert!(rendered.contains("cannot reconstruct the original environment"));
+        assert!(rendered.contains("never uses a shell"));
     }
 }

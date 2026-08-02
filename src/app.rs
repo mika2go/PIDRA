@@ -13,7 +13,7 @@ use crate::process::{
 use crate::{
     control::{
         ControlOutcome, ControlRequest, ControlResult, SignalAction,
-        restart::{RestartSource, resolve_restart_source},
+        restart::{RestartRequest, RestartResult, RestartSource, resolve_restart_source},
         risk::assess_termination,
     },
     process::ProcessState,
@@ -24,6 +24,7 @@ pub enum AppView {
     Table,
     Details,
     Confirm,
+    RestartConfirm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,14 @@ pub struct Confirmation {
     pub identity: ProcessIdentity,
     pub process_name: String,
     pub action: SignalAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartConfirmation {
+    pub identity: ProcessIdentity,
+    pub process_name: String,
+    pub source: RestartSource,
+    pub return_to: AppView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +84,9 @@ pub struct App {
     pub details_selected: usize,
     pub expanded_nodes: HashSet<ProcessIdentity>,
     pub confirmation: Option<Confirmation>,
+    pub restart_confirmation: Option<RestartConfirmation>,
     pending_control: VecDeque<ControlRequest>,
+    pending_restarts: VecDeque<RestartRequest>,
     pending_observation: HashMap<ProcessIdentity, (SignalAction, Instant)>,
     pub latest_actions: HashMap<ProcessIdentity, String>,
 }
@@ -114,7 +125,9 @@ impl App {
             details_selected: 0,
             expanded_nodes: HashSet::new(),
             confirmation: None,
+            restart_confirmation: None,
             pending_control: VecDeque::new(),
+            pending_restarts: VecDeque::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
         }
@@ -160,7 +173,9 @@ impl App {
             details_selected: 0,
             expanded_nodes: HashSet::new(),
             confirmation: None,
+            restart_confirmation: None,
             pending_control: VecDeque::new(),
+            pending_restarts: VecDeque::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
         }
@@ -259,6 +274,10 @@ impl App {
                 self.handle_confirmation_key(key);
                 return;
             }
+            AppView::RestartConfirm => {
+                self.handle_restart_confirmation_key(key);
+                return;
+            }
             AppView::Table => {}
         }
 
@@ -306,6 +325,7 @@ impl App {
                 }
             }
             KeyCode::Char('t' | 'T') => self.queue_selected_detail_action(SignalAction::Stop),
+            KeyCode::Char('r' | 'R') => self.open_selected_restart_confirmation(AppView::Details),
             KeyCode::Char('K') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.open_force_stop_confirmation();
             }
@@ -334,6 +354,35 @@ impl App {
                 self.confirmation = None;
                 self.view = AppView::Details;
                 self.status = "Force Stop cancelled".to_owned();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_restart_confirmation_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                if let Some(confirmation) = self.restart_confirmation.take() {
+                    let return_to = confirmation.return_to;
+                    self.status = format!(
+                        "Queued RESTART for {} ({})",
+                        confirmation.process_name, confirmation.identity.pid
+                    );
+                    self.pending_restarts.push_back(RestartRequest {
+                        identity: confirmation.identity,
+                        process_name: confirmation.process_name,
+                        source: confirmation.source,
+                    });
+                    self.view = return_to;
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                if let Some(confirmation) = self.restart_confirmation.take() {
+                    self.view = confirmation.return_to;
+                } else {
+                    self.view = AppView::Table;
+                }
+                self.status = "Restart cancelled".to_owned();
             }
             _ => {}
         }
@@ -403,18 +452,7 @@ impl App {
 
         match self.focus {
             FocusColumn::Restart => {
-                self.status = match self.restart_source_for(process.identity) {
-                    RestartSource::Unavailable { reason } => format!(
-                        "Restart unavailable for {} ({}): {reason}",
-                        process.name, process.identity.pid
-                    ),
-                    source => format!(
-                        "Restart source for {} ({}): {} — confirmation is required",
-                        process.name,
-                        process.identity.pid,
-                        source.summary()
-                    ),
-                };
+                self.open_restart_confirmation(&process, AppView::Table);
             }
             FocusColumn::Stop => {
                 self.queue_action(&process, SignalAction::Stop);
@@ -540,12 +578,62 @@ impl App {
         self.view = AppView::Confirm;
     }
 
+    fn open_selected_restart_confirmation(&mut self, return_to: AppView) {
+        let Some(process) = self.selected_detail_process().cloned() else {
+            self.status = "Selected process identity no longer exists".to_owned();
+            return;
+        };
+        self.open_restart_confirmation(&process, return_to);
+    }
+
+    fn open_restart_confirmation(&mut self, process: &ProcessSnapshot, return_to: AppView) {
+        let assessment = assess_termination(
+            process,
+            &self.all_processes,
+            i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        );
+        if assessment.rating == crate::control::risk::RiskRating::Protected {
+            self.status = format!("Restart blocked: {}", assessment.evidence.join("; "));
+            return;
+        }
+        let source = self.restart_source_for(process.identity);
+        if let RestartSource::Unavailable { reason } = source {
+            self.status = format!(
+                "Restart unavailable for {} ({}): {reason}",
+                process.name, process.identity.pid
+            );
+            return;
+        }
+        self.restart_confirmation = Some(RestartConfirmation {
+            identity: process.identity,
+            process_name: process.name.clone(),
+            source,
+            return_to,
+        });
+        self.view = AppView::RestartConfirm;
+    }
+
     pub fn take_control_requests(&mut self) -> impl Iterator<Item = ControlRequest> + '_ {
         self.pending_control.drain(..)
     }
 
+    pub fn take_restart_requests(&mut self) -> impl Iterator<Item = RestartRequest> + '_ {
+        self.pending_restarts.drain(..)
+    }
+
     pub fn report_control_dispatch_error(&mut self, error: &str) {
         self.status = format!("Control worker error: {error}");
+    }
+
+    pub fn report_restart_dispatch_error(&mut self, error: &str) {
+        self.status = format!("Restart worker error: {error}");
+    }
+
+    pub fn apply_restart_result(&mut self, result: RestartResult) {
+        let message = format!("RESTART: {}", result.outcome.message());
+        self.latest_actions
+            .insert(result.request.identity, message.clone());
+        self.status = message;
     }
 
     pub fn apply_control_result(&mut self, result: ControlResult) {
@@ -611,6 +699,8 @@ impl Default for App {
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsString, path::PathBuf};
+
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use crate::control::{ControlOutcome, ControlResult, SignalAction};
@@ -863,5 +953,58 @@ mod tests {
             app.latest_action_for(identity)
                 .is_some_and(|message| message.contains("pidfd"))
         );
+    }
+
+    fn prepare_direct_restart(app: &mut App) {
+        let identity = app.processes[0].identity;
+        let uid = rustix::process::getuid().as_raw();
+        for process in app
+            .processes
+            .iter_mut()
+            .chain(app.all_processes.iter_mut())
+            .filter(|process| process.identity == identity)
+        {
+            process.uid = uid;
+            process.executable = Some(PathBuf::from("/usr/bin/sleep"));
+            process.cwd = Some(PathBuf::from("/tmp"));
+            process.command = vec![OsString::from("sleep"), OsString::from("30")];
+        }
+    }
+
+    #[test]
+    fn restart_requires_confirmation_and_cancel_queues_nothing() {
+        let mut app = App::fixture();
+        prepare_direct_restart(&mut app);
+        app.focus = FocusColumn::Restart;
+
+        app.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(app.view, AppView::RestartConfirm);
+        assert!(app.restart_confirmation.is_some());
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(app.view, AppView::RestartConfirm);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.view, AppView::Table);
+        assert_eq!(app.take_restart_requests().count(), 0);
+    }
+
+    #[test]
+    fn accepted_restart_keeps_the_resolved_source_and_identity() {
+        let mut app = App::fixture();
+        prepare_direct_restart(&mut app);
+        let expected = app.processes[0].identity;
+        app.focus = FocusColumn::Restart;
+        app.handle_key(key(KeyCode::Enter));
+
+        app.handle_key(key(KeyCode::Char('y')));
+
+        let requests: Vec<_> = app.take_restart_requests().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].identity, expected);
+        assert!(matches!(
+            requests[0].source,
+            crate::control::restart::RestartSource::Direct { .. }
+        ));
     }
 }
