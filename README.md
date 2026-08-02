@@ -40,6 +40,39 @@ pidra
 If Cargo's bin directory is not in your `PATH`, either add `~/.cargo/bin` or
 link the binary into `~/.local/bin`.
 
+## NixOS Flake
+
+Add PIDRA to the `inputs` of the flake that manages your Home Manager
+configuration:
+
+```nix
+inputs.pidra.url = "github:mika2go/PIDRA";
+```
+
+Add the Home Manager module to a module file such as `apps/pidra/default.nix`:
+
+```nix
+{ inputs, ... }:
+
+{
+  imports = [
+    inputs.pidra.homeManagerModules.default
+  ];
+
+  programs.pidra.enable = true;
+}
+```
+
+If you prefer the package directly instead of the Home Manager module, add it
+to `home.packages`:
+
+```nix
+home.packages = [
+  inputs.pidra.packages.${pkgs.system}.pidra
+];
+
+```
+
 ## Controls
 
 | Key | What it does |
