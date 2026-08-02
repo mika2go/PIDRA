@@ -1,6 +1,6 @@
 # PIDRA
 
-<img src="assets/pidra.png" width="64" alt="PIDRA icon">
+
 
 PIDRA is a small Linux TUI for answering two questions:
 
