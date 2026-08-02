@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     };
 
     let tree_nodes = app.detail_nodes();
-    let tree_capacity = usize::from(area.height.saturating_sub(21).clamp(1, 5));
+    let tree_capacity = usize::from(area.height.saturating_sub(22).clamp(1, 5));
     let tree_start = app
         .details_selected
         .saturating_sub(tree_capacity.saturating_sub(1));
@@ -153,6 +153,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             classification.evidence.join("; ")
         )));
     }
+    lines.push(Line::from(format!(
+        "RESTART     {}",
+        app.restart_source_for(process.identity).summary()
+    )));
     lines.push(Line::styled("TERMINATION ANALYSIS", palette.table_header()));
     lines.push(Line::styled(
         format!(

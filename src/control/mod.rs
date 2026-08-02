@@ -1,3 +1,4 @@
+pub mod restart;
 pub mod risk;
 pub mod signal;
 mod worker;

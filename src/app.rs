@@ -12,7 +12,9 @@ use crate::process::{
 };
 use crate::{
     control::{
-        ControlOutcome, ControlRequest, ControlResult, SignalAction, risk::assess_termination,
+        ControlOutcome, ControlRequest, ControlResult, SignalAction,
+        restart::{RestartSource, resolve_restart_source},
+        risk::assess_termination,
     },
     process::ProcessState,
 };
@@ -82,6 +84,16 @@ impl App {
     #[must_use]
     pub fn graphical_total(&self) -> usize {
         self.gui_classifications.len()
+    }
+
+    #[must_use]
+    pub fn restart_source_for(&self, identity: ProcessIdentity) -> RestartSource {
+        self.process_by_identity(identity).map_or_else(
+            || RestartSource::Unavailable {
+                reason: "process identity no longer exists".to_owned(),
+            },
+            resolve_restart_source,
+        )
     }
 
     #[must_use]
@@ -391,10 +403,18 @@ impl App {
 
         match self.focus {
             FocusColumn::Restart => {
-                self.status = format!(
-                    "Restart unavailable for {} ({}) until Phase 5",
-                    process.name, process.identity.pid
-                );
+                self.status = match self.restart_source_for(process.identity) {
+                    RestartSource::Unavailable { reason } => format!(
+                        "Restart unavailable for {} ({}): {reason}",
+                        process.name, process.identity.pid
+                    ),
+                    source => format!(
+                        "Restart source for {} ({}): {} — confirmation is required",
+                        process.name,
+                        process.identity.pid,
+                        source.summary()
+                    ),
+                };
             }
             FocusColumn::Stop => {
                 self.queue_action(&process, SignalAction::Stop);

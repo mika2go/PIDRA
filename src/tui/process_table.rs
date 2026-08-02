@@ -33,6 +33,7 @@ pub fn render(
         .enumerate()
         .map(|(offset, process)| {
             row(
+                app,
                 process,
                 start + offset == app.selected,
                 app.focus,
@@ -143,6 +144,7 @@ pub fn hit_test(area: Rect, app: &App, x: u16, y: u16) -> Option<TableHit> {
 }
 
 fn row<'a>(
+    app: &App,
     process: &'a ProcessSnapshot,
     selected: bool,
     focus: FocusColumn,
@@ -154,7 +156,11 @@ fn row<'a>(
         (true, false) => "›",
         (false, _) => " ",
     };
-    let restart = "--";
+    let restart = if app.restart_source_for(process.identity).is_available() {
+        if options.ascii { "[R]" } else { "[↻]" }
+    } else {
+        "--"
+    };
     let stop = if options.ascii { "[S]" } else { "[■]" };
     let details = if options.ascii { "[D]" } else { "[i]" };
 
