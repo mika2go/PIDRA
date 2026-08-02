@@ -4,6 +4,7 @@ use clap::Parser;
 use pidra::{
     app::App,
     cli::Cli,
+    control::ControlWorker,
     event,
     process::ScanWorker,
     terminal::{TerminalSession, install_panic_hook},
@@ -27,6 +28,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new();
     let scanner = ScanWorker::spawn_system(cli.refresh_interval());
+    let control = ControlWorker::spawn();
     let options = RenderOptions {
         ascii: cli.ascii,
         no_color: cli.no_color,
@@ -36,6 +38,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         session.terminal_mut(),
         &mut app,
         &scanner,
+        &control,
         options,
         cli.refresh_interval(),
     )?;

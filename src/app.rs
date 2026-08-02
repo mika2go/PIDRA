@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::{Duration, Instant},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -7,11 +10,25 @@ use crate::process::{
     cpu::SystemMetrics,
     tree::{ProcessTree, TreeNode},
 };
+use crate::{
+    control::{
+        ControlOutcome, ControlRequest, ControlResult, SignalAction, risk::assess_termination,
+    },
+    process::ProcessState,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppView {
     Table,
     Details,
+    Confirm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    pub identity: ProcessIdentity,
+    pub process_name: String,
+    pub action: SignalAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +72,10 @@ pub struct App {
     pub details_root: Option<ProcessIdentity>,
     pub details_selected: usize,
     pub expanded_nodes: HashSet<ProcessIdentity>,
+    pub confirmation: Option<Confirmation>,
+    pending_control: VecDeque<ControlRequest>,
+    pending_observation: HashMap<ProcessIdentity, (SignalAction, Instant)>,
+    pub latest_actions: HashMap<ProcessIdentity, String>,
 }
 
 impl App {
@@ -80,6 +101,10 @@ impl App {
             details_root: None,
             details_selected: 0,
             expanded_nodes: HashSet::new(),
+            confirmation: None,
+            pending_control: VecDeque::new(),
+            pending_observation: HashMap::new(),
+            latest_actions: HashMap::new(),
         }
     }
 
@@ -122,6 +147,10 @@ impl App {
             details_root: None,
             details_selected: 0,
             expanded_nodes: HashSet::new(),
+            confirmation: None,
+            pending_control: VecDeque::new(),
+            pending_observation: HashMap::new(),
+            latest_actions: HashMap::new(),
         }
     }
 
@@ -138,6 +167,7 @@ impl App {
             .map(|classification| (classification.identity, classification))
             .collect();
         self.rebuild_visible(selected_identity);
+        self.observe_pending_actions();
         let details_missing = self
             .details_root
             .is_some_and(|identity| self.process_by_identity(identity).is_none());
@@ -208,9 +238,16 @@ impl App {
             return;
         }
 
-        if self.view == AppView::Details {
-            self.handle_details_key(key);
-            return;
+        match self.view {
+            AppView::Details => {
+                self.handle_details_key(key);
+                return;
+            }
+            AppView::Confirm => {
+                self.handle_confirmation_key(key);
+                return;
+            }
+            AppView::Table => {}
         }
 
         match key.code {
@@ -244,10 +281,47 @@ impl App {
             }
             KeyCode::Right | KeyCode::Enter => self.expand_selected_detail_node(),
             KeyCode::Left => self.collapse_or_select_parent(),
-            KeyCode::Char('f' | 'F' | 't' | 'T' | 'k' | 'K') => {
-                self.status =
-                    "Process actions remain disabled until Phase 4 identity-safe signalling"
-                        .to_owned();
+            KeyCode::Char('f' | 'F') => {
+                let action = self.selected_detail_process().map(|process| {
+                    if process.state == ProcessState::Stopped {
+                        SignalAction::Resume
+                    } else {
+                        SignalAction::Freeze
+                    }
+                });
+                if let Some(action) = action {
+                    self.queue_selected_detail_action(action);
+                }
+            }
+            KeyCode::Char('t' | 'T') => self.queue_selected_detail_action(SignalAction::Stop),
+            KeyCode::Char('K') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.open_force_stop_confirmation();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_confirmation_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                if let Some(confirmation) = self.confirmation.take() {
+                    self.pending_control.push_back(ControlRequest {
+                        identity: confirmation.identity,
+                        action: confirmation.action,
+                    });
+                    self.status = format!(
+                        "Queued {} for {} ({})",
+                        confirmation.action.label(),
+                        confirmation.process_name,
+                        confirmation.identity.pid
+                    );
+                }
+                self.view = AppView::Details;
+            }
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                self.confirmation = None;
+                self.view = AppView::Details;
+                self.status = "Force Stop cancelled".to_owned();
             }
             _ => {}
         }
@@ -323,10 +397,7 @@ impl App {
                 );
             }
             FocusColumn::Stop => {
-                self.status = format!(
-                    "Stop disabled for {} ({}) until safe signalling is implemented",
-                    process.name, process.identity.pid
-                );
+                self.queue_action(&process, SignalAction::Stop);
             }
             FocusColumn::Details => {
                 self.view = AppView::Details;
@@ -397,6 +468,119 @@ impl App {
             .details_selected
             .min(self.detail_nodes().len().saturating_sub(1));
     }
+
+    fn queue_selected_detail_action(&mut self, action: SignalAction) {
+        let Some(process) = self.selected_detail_process().cloned() else {
+            self.status = "Selected process identity no longer exists".to_owned();
+            return;
+        };
+        self.queue_action(&process, action);
+    }
+
+    fn queue_action(&mut self, process: &ProcessSnapshot, action: SignalAction) {
+        let assessment = assess_termination(
+            process,
+            &self.all_processes,
+            i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        );
+        if assessment.rating == crate::control::risk::RiskRating::Protected {
+            self.status = format!("Action blocked: {}", assessment.evidence.join("; "));
+            return;
+        }
+        self.pending_control.push_back(ControlRequest {
+            identity: process.identity,
+            action,
+        });
+        self.status = format!(
+            "Queued {} for {} ({})",
+            action.label(),
+            process.name,
+            process.identity.pid
+        );
+    }
+
+    fn open_force_stop_confirmation(&mut self) {
+        let Some(process) = self.selected_detail_process().cloned() else {
+            return;
+        };
+        let assessment = assess_termination(
+            &process,
+            &self.all_processes,
+            i32::try_from(std::process::id()).unwrap_or(i32::MAX),
+        );
+        if assessment.rating == crate::control::risk::RiskRating::Protected {
+            self.status = format!("Force Stop blocked: {}", assessment.evidence.join("; "));
+            return;
+        }
+        self.confirmation = Some(Confirmation {
+            identity: process.identity,
+            process_name: process.name,
+            action: SignalAction::ForceStop,
+        });
+        self.view = AppView::Confirm;
+    }
+
+    pub fn take_control_requests(&mut self) -> impl Iterator<Item = ControlRequest> + '_ {
+        self.pending_control.drain(..)
+    }
+
+    pub fn report_control_dispatch_error(&mut self, error: &str) {
+        self.status = format!("Control worker error: {error}");
+    }
+
+    pub fn apply_control_result(&mut self, result: ControlResult) {
+        let message = format!(
+            "{}: {}",
+            result.request.action.label(),
+            result.outcome.message()
+        );
+        self.latest_actions
+            .insert(result.request.identity, message.clone());
+        self.status = message;
+        if matches!(result.outcome, ControlOutcome::Sent(_)) {
+            self.pending_observation.insert(
+                result.request.identity,
+                (result.request.action, Instant::now()),
+            );
+        }
+    }
+
+    fn observe_pending_actions(&mut self) {
+        let now = Instant::now();
+        let mut finished = Vec::new();
+        for (identity, (action, started_at)) in &self.pending_observation {
+            let current = self.process_by_identity(*identity);
+            let observation = match (action, current) {
+                (SignalAction::Stop | SignalAction::ForceStop, None) => Some("EXITED"),
+                (SignalAction::Freeze, Some(process)) if process.state == ProcessState::Stopped => {
+                    Some("FROZEN")
+                }
+                (SignalAction::Resume, Some(process)) if process.state != ProcessState::Stopped => {
+                    Some("RESUMED")
+                }
+                (_, None) => Some("NOT FOUND"),
+                (SignalAction::Stop, Some(_))
+                    if now.saturating_duration_since(*started_at) >= Duration::from_secs(2) =>
+                {
+                    Some("STILL RUNNING — no automatic SIGKILL escalation")
+                }
+                _ => None,
+            };
+            if let Some(observation) = observation {
+                self.latest_actions
+                    .insert(*identity, format!("{}: {observation}", action.label()));
+                finished.push(*identity);
+            }
+        }
+        for identity in finished {
+            self.pending_observation.remove(&identity);
+        }
+    }
+
+    #[must_use]
+    pub fn latest_action_for(&self, identity: ProcessIdentity) -> Option<&str> {
+        self.latest_actions.get(&identity).map(String::as_str)
+    }
 }
 
 impl Default for App {
@@ -409,6 +593,7 @@ impl Default for App {
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    use crate::control::{ControlOutcome, ControlResult, SignalAction};
     use crate::process::{
         GuiClassification, GuiConfidence, ProcessSnapshot, ScanBatch, cpu::SystemMetrics,
     };
@@ -417,6 +602,24 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn open_fixture_details(app: &mut App) {
+        let identity = app.processes[0].identity;
+        let uid = rustix::process::getuid().as_raw();
+        app.processes
+            .iter_mut()
+            .find(|process| process.identity == identity)
+            .expect("visible fixture process")
+            .uid = uid;
+        app.all_processes
+            .iter_mut()
+            .find(|process| process.identity == identity)
+            .expect("fixture process")
+            .uid = uid;
+        app.focus = FocusColumn::Details;
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.view, AppView::Details);
     }
 
     #[test]
@@ -565,5 +768,80 @@ mod tests {
         assert_eq!(app.details_selected, 0);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.view, AppView::Table);
+    }
+
+    #[test]
+    fn table_stop_queues_sigterm_for_the_exact_identity() {
+        let mut app = App::fixture();
+        let expected = app.processes[0].identity;
+        let uid = rustix::process::getuid().as_raw();
+        app.processes[0].uid = uid;
+        app.all_processes[0].uid = uid;
+        app.focus = FocusColumn::Stop;
+
+        app.handle_key(key(KeyCode::Enter));
+
+        let requests: Vec<_> = app.take_control_requests().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].identity, expected);
+        assert_eq!(requests[0].action, SignalAction::Stop);
+    }
+
+    #[test]
+    fn force_stop_requires_explicit_confirmation_and_can_be_cancelled() {
+        let mut app = App::fixture();
+        open_fixture_details(&mut app);
+        let expected = app
+            .selected_detail_process()
+            .expect("detail target")
+            .identity;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+
+        assert_eq!(app.view, AppView::Confirm);
+        let confirmation = app.confirmation.as_ref().expect("confirmation");
+        assert_eq!(confirmation.identity, expected);
+        assert_eq!(confirmation.action, SignalAction::ForceStop);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.view, AppView::Details);
+        assert!(app.confirmation.is_none());
+        assert_eq!(app.take_control_requests().count(), 0);
+    }
+
+    #[test]
+    fn force_stop_confirmation_queues_sigkill_only_after_acceptance() {
+        let mut app = App::fixture();
+        open_fixture_details(&mut app);
+        let expected = app
+            .selected_detail_process()
+            .expect("detail target")
+            .identity;
+        app.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+
+        app.handle_key(key(KeyCode::Char('y')));
+
+        assert_eq!(app.view, AppView::Details);
+        let requests: Vec<_> = app.take_control_requests().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].identity, expected);
+        assert_eq!(requests[0].action, SignalAction::ForceStop);
+    }
+
+    #[test]
+    fn sent_signal_is_reported_as_pending_kernel_observation() {
+        let mut app = App::fixture();
+        let identity = app.processes[0].identity;
+        app.apply_control_result(ControlResult {
+            request: crate::control::ControlRequest {
+                identity,
+                action: SignalAction::Stop,
+            },
+            outcome: ControlOutcome::Sent(crate::control::DeliveryMethod::Pidfd),
+        });
+
+        assert!(
+            app.latest_action_for(identity)
+                .is_some_and(|message| message.contains("pidfd"))
+        );
     }
 }

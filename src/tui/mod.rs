@@ -1,3 +1,4 @@
+mod confirm;
 mod details;
 mod layout;
 mod process_table;
@@ -24,9 +25,16 @@ pub struct RenderOptions {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
-    if app.view == AppView::Details {
-        details::render(frame, app, options);
-        return;
+    match app.view {
+        AppView::Details => {
+            details::render(frame, app, options);
+            return;
+        }
+        AppView::Confirm => {
+            confirm::render(frame, app, options);
+            return;
+        }
+        AppView::Table => {}
     }
     let areas = layout::areas(frame.area());
     let palette = theme::Palette::new(options.no_color);
@@ -97,6 +105,9 @@ fn percent(value: Option<f32>) -> String {
 
 #[must_use]
 pub fn table_hit(area: ratatui::layout::Rect, app: &App, x: u16, y: u16) -> Option<TableHit> {
+    if app.view != AppView::Table {
+        return None;
+    }
     let areas = layout::areas(area);
     process_table::hit_test(areas.table, app, x, y)
 }
@@ -107,7 +118,7 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::app::{App, FocusColumn};
+    use crate::app::{App, AppView, FocusColumn};
 
     use super::{RenderOptions, render};
 
@@ -189,5 +200,40 @@ mod tests {
         assert!(rendered.contains("TERMINATION ANALYSIS"));
         assert!(rendered.contains("CLOSE FROM APPLICATION FIRST"));
         assert!(!rendered.contains("PROCESS NAME"));
+    }
+
+    #[test]
+    fn force_stop_confirmation_names_the_exact_target_and_risk() {
+        let backend = TestBackend::new(110, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        let identity = app.processes[0].identity;
+        let uid = rustix::process::getuid().as_raw();
+        app.processes[0].uid = uid;
+        app.all_processes[0].uid = uid;
+        app.focus = FocusColumn::Details;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+        assert_eq!(app.view, AppView::Confirm);
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: false,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render confirmation");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("CONFIRM FORCE STOP"));
+        assert!(rendered.contains(&format!("PID        {}", identity.pid)));
+        assert!(rendered.contains("exact PID/start-time identity"));
+        assert!(rendered.contains("SIGKILL gives the process no chance"));
+        assert!(rendered.contains("ENTER / Y CONFIRM"));
     }
 }

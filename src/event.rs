@@ -3,12 +3,13 @@ use std::{io, time::Duration};
 use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use ratatui::{Terminal, backend::Backend, layout::Rect};
 
-use crate::{app::App, process::ScanWorker, tui};
+use crate::{app::App, control::ControlWorker, process::ScanWorker, tui};
 
 pub fn run<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
     scanner: &ScanWorker,
+    control: &ControlWorker,
     options: tui::RenderOptions,
     refresh_interval: Duration,
 ) -> io::Result<()>
@@ -22,6 +23,17 @@ where
         .unwrap_or_else(std::time::Instant::now);
 
     while !app.should_quit {
+        let requests: Vec<_> = app.take_control_requests().collect();
+        for request in requests {
+            if let Err(error) = control.request(request) {
+                app.report_control_dispatch_error(&error);
+            }
+        }
+        while let Some(result) = control.try_result() {
+            app.apply_control_result(result);
+            dirty = true;
+        }
+
         if let Some(message) = scanner.try_latest() {
             let _captured_at = message.captured_at;
             match message.result {

@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     };
 
     let tree_nodes = app.detail_nodes();
-    let tree_capacity = usize::from(area.height.saturating_sub(20).clamp(1, 5));
+    let tree_capacity = usize::from(area.height.saturating_sub(21).clamp(1, 5));
     let tree_start = app
         .details_selected
         .saturating_sub(tree_capacity.saturating_sub(1));
@@ -167,9 +167,18 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         risk.evidence.join("; ")
     )));
     lines.push(Line::from(format!("WARNING     {}", risk.warning)));
+    lines.push(Line::from(format!(
+        "LATEST      {}",
+        app.latest_action_for(process.identity)
+            .unwrap_or("no action in this session")
+    )));
     lines.push(Line::styled("ACTIONS", palette.table_header()));
     lines.push(Line::from(
-        "F FREEZE   T STOP   SHIFT+K FORCE STOP   (disabled until Phase 4)",
+        if process.state == crate::process::ProcessState::Stopped {
+            "F RESUME   T STOP   SHIFT+K FORCE STOP"
+        } else {
+            "F FREEZE   T STOP   SHIFT+K FORCE STOP"
+        },
     ));
     lines.push(Line::from(
         "ESC BACK   ↑↓ SELECT NODE   ←→ COLLAPSE/EXPAND   Q QUIT",

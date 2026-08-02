@@ -65,7 +65,11 @@ pub fn assess_termination(
         .unwrap_or(&process.name)
         .to_ascii_lowercase();
 
-    if process.identity.pid == 1 || process.identity.pid == pidra_pid {
+    let contains_pidra = tree
+        .descendants(process.identity)
+        .iter()
+        .any(|identity| identity.pid == pidra_pid);
+    if process.identity.pid == 1 || process.identity.pid == pidra_pid || contains_pidra {
         return protected("PID 1 and PIDRA itself are never valid targets");
     }
     if process.uid != current_uid {
