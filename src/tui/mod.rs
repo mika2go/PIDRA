@@ -1,5 +1,6 @@
 mod confirm;
 mod details;
+mod history;
 mod layout;
 mod process_table;
 mod restart_confirm;
@@ -37,6 +38,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         }
         AppView::RestartConfirm => {
             restart_confirm::render(frame, app, options);
+            return;
+        }
+        AppView::History => {
+            history::render(frame, app, options);
             return;
         }
         AppView::Table => {}
@@ -97,9 +102,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             "SEARCH: TYPE NAME OR PID   ⌫ DELETE   ENTER/ESC CLOSE"
         }
     } else if options.ascii {
-        "UP/DOWN SELECT   LEFT/RIGHT ACTION   ENTER ACTIVATE   / SEARCH   Q QUIT"
+        "UP/DOWN ROW   LEFT/RIGHT ACTION   ENTER USE   / SEARCH   H HISTORY   Q QUIT"
     } else {
-        "↑↓ SELECT   ←→ ACTION   ENTER ACTIVATE   / SEARCH   Q QUIT"
+        "↑↓ ROW   ←→ ACTION   ENTER USE   / SEARCH   H HISTORY   Q QUIT"
     };
     frame.render_widget(Paragraph::new(footer).style(palette.footer()), areas.footer);
 }
@@ -152,7 +157,7 @@ mod tests {
         assert!(rendered.contains("PIDRA"));
         assert!(rendered.contains("PROCESS NAME"));
         assert!(rendered.contains("firefox"));
-        assert!(rendered.contains("ENTER ACTIVATE"));
+        assert!(rendered.contains("ENTER USE"));
     }
 
     #[test]
@@ -277,5 +282,43 @@ mod tests {
         assert!(rendered.contains("DIRECT EXEC"));
         assert!(rendered.contains("cannot reconstruct the original environment"));
         assert!(rendered.contains("never uses a shell"));
+    }
+
+    #[test]
+    fn action_history_replaces_the_table_and_shows_identity_and_result() {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        let identity = app.processes[0].identity;
+        app.history.record(
+            "nira".to_owned(),
+            identity,
+            "STOP (SIGTERM)",
+            "EXITED; CHILDREN REMAIN — 18423",
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render action history");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("PIDRA ACTION HISTORY"));
+        assert!(rendered.contains("STOP (SIGTERM)"));
+        assert!(rendered.contains("CHILDREN REMAIN"));
+        assert!(rendered.contains(&format!(
+            "PID {} / {}",
+            identity.pid, identity.start_time_ticks
+        )));
+        assert!(!rendered.contains("PROCESS NAME"));
     }
 }

@@ -1,3 +1,4 @@
+pub mod diagnosis;
 pub mod restart;
 mod restart_worker;
 pub mod risk;

@@ -1,4 +1,5 @@
 use std::{
+    io::{BufRead, BufReader, Write},
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, Stdio},
@@ -9,9 +10,13 @@ use std::{
 use pidra::{
     control::{
         ControlOutcome, SignalAction,
+        diagnosis::{Diagnosis, DiagnosisContext, diagnose_after_signal},
         signal::{read_identity, send_signal},
     },
-    process::{ProcessIdentity, ProcessState, procfs::parse_stat},
+    process::{
+        ProcessIdentity, ProcessState,
+        procfs::{parse_stat, scan_system_procfs},
+    },
 };
 
 struct TestChild(Child);
@@ -47,6 +52,21 @@ impl Drop for TestChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+struct TestProcessTree {
+    parent: Child,
+    child_identity: Option<ProcessIdentity>,
+}
+
+impl Drop for TestProcessTree {
+    fn drop(&mut self) {
+        let _ = self.parent.kill();
+        let _ = self.parent.wait();
+        if let Some(identity) = self.child_identity {
+            let _ = send_signal(identity, SignalAction::ForceStop);
+        }
     }
 }
 
@@ -109,4 +129,77 @@ fn changed_start_time_is_rejected_without_signalling_the_child() {
         ControlOutcome::IdentityChanged
     );
     assert!(child.0.try_wait().expect("query child status").is_none());
+}
+
+#[test]
+fn helper_process_parent() {
+    if std::env::var_os("PIDRA_PARENT_HELPER").is_none() {
+        return;
+    }
+    let mut child = Command::new("/usr/bin/sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn helper child");
+    println!("PIDRA_CHILD={}", child.id());
+    std::io::stdout().flush().expect("flush helper PID");
+    let _ = child.wait();
+}
+
+#[test]
+fn diagnosis_names_a_test_owned_child_that_survives_its_parent() {
+    let executable = std::env::current_exe().expect("current integration test executable");
+    let parent = Command::new(executable)
+        .args(["--exact", "helper_process_parent", "--nocapture"])
+        .env("PIDRA_PARENT_HELPER", "1")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn controlled parent helper");
+    let mut tree = TestProcessTree {
+        parent,
+        child_identity: None,
+    };
+    let stdout = tree.parent.stdout.take().expect("helper stdout");
+    let mut child_pid = None;
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        if let Some(value) = line.strip_prefix("PIDRA_CHILD=") {
+            child_pid = value.parse::<i32>().ok();
+            break;
+        }
+    }
+    let child_pid = child_pid.expect("helper reported child PID");
+    let parent_identity = read_identity(
+        Path::new("/proc"),
+        i32::try_from(tree.parent.id()).expect("parent PID fits i32"),
+    )
+    .expect("parent identity");
+    let child_identity = read_identity(Path::new("/proc"), child_pid).expect("child identity");
+    tree.child_identity = Some(child_identity);
+    let before = scan_system_procfs().expect("scan before parent stop");
+    let target = before
+        .iter()
+        .find(|process| process.identity == parent_identity)
+        .expect("parent snapshot");
+    let context = DiagnosisContext::capture(target, &before);
+    assert!(context.descendants.contains(&child_identity));
+
+    assert!(matches!(
+        send_signal(parent_identity, SignalAction::Stop),
+        ControlOutcome::Sent(_)
+    ));
+    assert!(wait_until(|| tree
+        .parent
+        .try_wait()
+        .is_ok_and(|status| status.is_some())));
+    let after = scan_system_procfs().expect("scan after parent stop");
+    let diagnoses =
+        diagnose_after_signal(&context, SignalAction::Stop, &after, Duration::from_secs(1))
+            .expect("completed diagnosis");
+
+    assert!(diagnoses.contains(&Diagnosis::ChildrenRemain(vec![child_identity])));
 }

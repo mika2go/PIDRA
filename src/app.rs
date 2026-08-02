@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,9 +13,11 @@ use crate::process::{
 use crate::{
     control::{
         ControlOutcome, ControlRequest, ControlResult, SignalAction,
+        diagnosis::{DiagnosisContext, diagnose_after_signal, diagnose_dispatch_failure},
         restart::{RestartRequest, RestartResult, RestartSource, resolve_restart_source},
         risk::assess_termination,
     },
+    history::ActionHistory,
     process::ProcessState,
 };
 
@@ -25,6 +27,7 @@ pub enum AppView {
     Details,
     Confirm,
     RestartConfirm,
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +43,13 @@ pub struct RestartConfirmation {
     pub process_name: String,
     pub source: RestartSource,
     pub return_to: AppView,
+}
+
+#[derive(Debug)]
+struct PendingObservation {
+    action: SignalAction,
+    started_at: Instant,
+    context: DiagnosisContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +95,12 @@ pub struct App {
     pub expanded_nodes: HashSet<ProcessIdentity>,
     pub confirmation: Option<Confirmation>,
     pub restart_confirmation: Option<RestartConfirmation>,
+    pub history: ActionHistory,
+    history_return: AppView,
     pending_control: VecDeque<ControlRequest>,
     pending_restarts: VecDeque<RestartRequest>,
-    pending_observation: HashMap<ProcessIdentity, (SignalAction, Instant)>,
+    queued_diagnosis: HashMap<(ProcessIdentity, SignalAction), DiagnosisContext>,
+    pending_observation: HashMap<ProcessIdentity, PendingObservation>,
     pub latest_actions: HashMap<ProcessIdentity, String>,
 }
 
@@ -126,8 +139,11 @@ impl App {
             expanded_nodes: HashSet::new(),
             confirmation: None,
             restart_confirmation: None,
+            history: ActionHistory::default(),
+            history_return: AppView::Table,
             pending_control: VecDeque::new(),
             pending_restarts: VecDeque::new(),
+            queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
         }
@@ -174,8 +190,11 @@ impl App {
             expanded_nodes: HashSet::new(),
             confirmation: None,
             restart_confirmation: None,
+            history: ActionHistory::default(),
+            history_return: AppView::Table,
             pending_control: VecDeque::new(),
             pending_restarts: VecDeque::new(),
+            queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
         }
@@ -278,6 +297,10 @@ impl App {
                 self.handle_restart_confirmation_key(key);
                 return;
             }
+            AppView::History => {
+                self.handle_history_key(key);
+                return;
+            }
             AppView::Table => {}
         }
 
@@ -291,6 +314,7 @@ impl App {
             KeyCode::Char('d' | 'D') => self.focus = FocusColumn::Details,
             KeyCode::Enter => self.activate_focused_action(),
             KeyCode::Char('/') => self.searching = true,
+            KeyCode::Char('h' | 'H') => self.open_history(AppView::Table),
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
             _ => {}
         }
@@ -326,6 +350,7 @@ impl App {
             }
             KeyCode::Char('t' | 'T') => self.queue_selected_detail_action(SignalAction::Stop),
             KeyCode::Char('r' | 'R') => self.open_selected_restart_confirmation(AppView::Details),
+            KeyCode::Char('h' | 'H') => self.open_history(AppView::Details),
             KeyCode::Char('K') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.open_force_stop_confirmation();
             }
@@ -337,6 +362,13 @@ impl App {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
                 if let Some(confirmation) = self.confirmation.take() {
+                    if let Some(process) = self.process_by_identity(confirmation.identity).cloned()
+                    {
+                        self.queued_diagnosis.insert(
+                            (confirmation.identity, confirmation.action),
+                            DiagnosisContext::capture(&process, &self.all_processes),
+                        );
+                    }
                     self.pending_control.push_back(ControlRequest {
                         identity: confirmation.identity,
                         action: confirmation.action,
@@ -386,6 +418,23 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_history_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('h' | 'H') => {
+                self.view = self.history_return;
+                self.status = "Closed action history".to_owned();
+            }
+            KeyCode::Char('q' | 'Q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn open_history(&mut self, return_to: AppView) {
+        self.history_return = return_to;
+        self.view = AppView::History;
+        self.status = format!("{} completed actions this session", self.history.len());
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
@@ -549,6 +598,10 @@ impl App {
             identity: process.identity,
             action,
         });
+        self.queued_diagnosis.insert(
+            (process.identity, action),
+            DiagnosisContext::capture(process, &self.all_processes),
+        );
         self.status = format!(
             "Queued {} for {} ({})",
             action.label(),
@@ -633,6 +686,12 @@ impl App {
         let message = format!("RESTART: {}", result.outcome.message());
         self.latest_actions
             .insert(result.request.identity, message.clone());
+        self.history.record(
+            result.request.process_name,
+            result.request.identity,
+            "RESTART",
+            result.outcome.message(),
+        );
         self.status = message;
     }
 
@@ -645,43 +704,73 @@ impl App {
         self.latest_actions
             .insert(result.request.identity, message.clone());
         self.status = message;
+        let context = self
+            .queued_diagnosis
+            .remove(&(result.request.identity, result.request.action));
         if matches!(result.outcome, ControlOutcome::Sent(_)) {
-            self.pending_observation.insert(
-                result.request.identity,
-                (result.request.action, Instant::now()),
-            );
+            let context = context.or_else(|| {
+                self.process_by_identity(result.request.identity)
+                    .map(|process| DiagnosisContext::capture(process, &self.all_processes))
+            });
+            if let Some(context) = context {
+                self.pending_observation.insert(
+                    result.request.identity,
+                    PendingObservation {
+                        action: result.request.action,
+                        started_at: Instant::now(),
+                        context,
+                    },
+                );
+            }
+        } else {
+            if let Some(diagnosis) = diagnose_dispatch_failure(&result.outcome) {
+                let message = format!("{}: {}", result.request.action.label(), diagnosis.summary());
+                self.latest_actions
+                    .insert(result.request.identity, message.clone());
+                self.history.record(
+                    context.map_or_else(
+                        || format!("PID {}", result.request.identity.pid),
+                        |context| context.target.name,
+                    ),
+                    result.request.identity,
+                    result.request.action.label(),
+                    diagnosis.summary(),
+                );
+                self.status = message;
+            }
         }
     }
 
     fn observe_pending_actions(&mut self) {
         let now = Instant::now();
         let mut finished = Vec::new();
-        for (identity, (action, started_at)) in &self.pending_observation {
-            let current = self.process_by_identity(*identity);
-            let observation = match (action, current) {
-                (SignalAction::Stop | SignalAction::ForceStop, None) => Some("EXITED"),
-                (SignalAction::Freeze, Some(process)) if process.state == ProcessState::Stopped => {
-                    Some("FROZEN")
-                }
-                (SignalAction::Resume, Some(process)) if process.state != ProcessState::Stopped => {
-                    Some("RESUMED")
-                }
-                (_, None) => Some("NOT FOUND"),
-                (SignalAction::Stop, Some(_))
-                    if now.saturating_duration_since(*started_at) >= Duration::from_secs(2) =>
-                {
-                    Some("STILL RUNNING — no automatic SIGKILL escalation")
-                }
-                _ => None,
-            };
-            if let Some(observation) = observation {
-                self.latest_actions
-                    .insert(*identity, format!("{}: {observation}", action.label()));
-                finished.push(*identity);
+        for (identity, pending) in &self.pending_observation {
+            if let Some(diagnoses) = diagnose_after_signal(
+                &pending.context,
+                pending.action,
+                &self.all_processes,
+                now.saturating_duration_since(pending.started_at),
+            ) {
+                let summary = diagnoses
+                    .iter()
+                    .map(|diagnosis| diagnosis.summary())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                finished.push((
+                    *identity,
+                    pending.context.target.name.clone(),
+                    pending.action,
+                    summary,
+                ));
             }
         }
-        for identity in finished {
+        for (identity, process_name, action, summary) in finished {
             self.pending_observation.remove(&identity);
+            let message = format!("{}: {summary}", action.label());
+            self.latest_actions.insert(identity, message.clone());
+            self.history
+                .record(process_name, identity, action.label(), summary);
+            self.status = message;
         }
     }
 
@@ -1006,5 +1095,88 @@ mod tests {
             requests[0].source,
             crate::control::restart::RestartSource::Direct { .. }
         ));
+    }
+
+    fn dispatch_fixture_stop(app: &mut App) -> crate::control::ControlRequest {
+        let identity = app.processes[0].identity;
+        let uid = rustix::process::getuid().as_raw();
+        for process in app
+            .processes
+            .iter_mut()
+            .chain(app.all_processes.iter_mut())
+            .filter(|process| process.identity == identity)
+        {
+            process.uid = uid;
+            process.executable = Some(PathBuf::from("/usr/bin/demo"));
+            process.cgroups = vec!["0::/app.slice/demo.service".to_owned()];
+        }
+        app.focus = FocusColumn::Stop;
+        app.handle_key(key(KeyCode::Enter));
+        app.take_control_requests().next().expect("stop request")
+    }
+
+    #[test]
+    fn scanner_update_diagnoses_a_supervisor_restart_and_records_history() {
+        let mut app = App::fixture();
+        let request = dispatch_fixture_stop(&mut app);
+        app.apply_control_result(ControlResult {
+            request,
+            outcome: ControlOutcome::Sent(crate::control::DeliveryMethod::Pidfd),
+        });
+        let mut replacement = ProcessSnapshot::fixture("renamed-demo", 29_001, 1);
+        replacement.uid = rustix::process::getuid().as_raw();
+        replacement.identity.start_time_ticks = request.identity.start_time_ticks + 10;
+        replacement.cgroups = vec!["0::/app.slice/demo.service".to_owned()];
+
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![replacement.clone()],
+            graphical: Vec::new(),
+            system: SystemMetrics::default(),
+        });
+
+        let result = app.latest_action_for(request.identity).expect("diagnosis");
+        assert!(result.contains("RESTARTED"));
+        assert!(result.contains(&replacement.identity.pid.to_string()));
+        assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn scanner_update_names_a_surviving_captured_child() {
+        let mut app = App::fixture();
+        let mut child = ProcessSnapshot::fixture("survivor", 18_423, 1);
+        child.parent_pid = Some(app.processes[0].identity.pid);
+        child.uid = rustix::process::getuid().as_raw();
+        app.all_processes.push(child.clone());
+        let request = dispatch_fixture_stop(&mut app);
+        app.apply_control_result(ControlResult {
+            request,
+            outcome: ControlOutcome::Sent(crate::control::DeliveryMethod::Pidfd),
+        });
+
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![child.clone()],
+            graphical: Vec::new(),
+            system: SystemMetrics::default(),
+        });
+
+        let result = app.latest_action_for(request.identity).expect("diagnosis");
+        assert!(result.contains("CHILDREN REMAIN"));
+        assert!(result.contains(&child.identity.pid.to_string()));
+    }
+
+    #[test]
+    fn history_is_keyboard_reachable_and_returns_to_the_previous_view() {
+        let mut app = App::fixture();
+        app.history.record(
+            "demo".to_owned(),
+            app.processes[0].identity,
+            "STOP",
+            "EXITED",
+        );
+
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.view, AppView::History);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.view, AppView::Table);
     }
 }

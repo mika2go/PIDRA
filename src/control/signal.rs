@@ -7,7 +7,7 @@ use rustix::{
 
 use crate::process::{ProcessIdentity, procfs::parse_stat};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignalAction {
     Stop,
     Freeze,
