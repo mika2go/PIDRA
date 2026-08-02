@@ -12,6 +12,9 @@ rustix = { version = "1.1.4", features = ["param", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.19"
+toml = "1.1.4"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 x11rb = "0.14.0"
 zbus = "5.18.0"
 

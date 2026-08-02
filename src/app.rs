@@ -28,6 +28,7 @@ pub enum AppView {
     Confirm,
     RestartConfirm,
     History,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +98,8 @@ pub struct App {
     pub restart_confirmation: Option<RestartConfirmation>,
     pub history: ActionHistory,
     history_return: AppView,
+    help_return: AppView,
+    requested_pid: Option<i32>,
     pending_control: VecDeque<ControlRequest>,
     pending_restarts: VecDeque<RestartRequest>,
     queued_diagnosis: HashMap<(ProcessIdentity, SignalAction), DiagnosisContext>,
@@ -141,6 +144,8 @@ impl App {
             restart_confirmation: None,
             history: ActionHistory::default(),
             history_return: AppView::Table,
+            help_return: AppView::Table,
+            requested_pid: None,
             pending_control: VecDeque::new(),
             pending_restarts: VecDeque::new(),
             queued_diagnosis: HashMap::new(),
@@ -192,6 +197,8 @@ impl App {
             restart_confirmation: None,
             history: ActionHistory::default(),
             history_return: AppView::Table,
+            help_return: AppView::Table,
+            requested_pid: None,
             pending_control: VecDeque::new(),
             pending_restarts: VecDeque::new(),
             queued_diagnosis: HashMap::new(),
@@ -212,6 +219,7 @@ impl App {
             .into_iter()
             .map(|classification| (classification.identity, classification))
             .collect();
+        self.open_requested_pid();
         self.rebuild_visible(selected_identity);
         self.observe_pending_actions();
         let details_missing = self
@@ -227,6 +235,30 @@ impl App {
             );
         }
         self.clamp_details_selection();
+    }
+
+    pub fn request_initial_pid(&mut self, pid: Option<i32>) {
+        self.requested_pid = pid.filter(|pid| *pid > 0);
+    }
+
+    fn open_requested_pid(&mut self) {
+        let Some(pid) = self.requested_pid else {
+            return;
+        };
+        let Some(process) = self
+            .all_processes
+            .iter()
+            .find(|process| process.identity.pid == pid)
+        else {
+            return;
+        };
+        self.details_root = Some(process.identity);
+        self.details_selected = 0;
+        self.expanded_nodes.clear();
+        self.expanded_nodes.insert(process.identity);
+        self.view = AppView::Details;
+        self.status = format!("Inspecting requested PID {pid}");
+        self.requested_pid = None;
     }
 
     fn rebuild_visible(&mut self, selected_identity: Option<ProcessIdentity>) {
@@ -301,6 +333,10 @@ impl App {
                 self.handle_history_key(key);
                 return;
             }
+            AppView::Help => {
+                self.handle_help_key(key);
+                return;
+            }
             AppView::Table => {}
         }
 
@@ -315,6 +351,7 @@ impl App {
             KeyCode::Enter => self.activate_focused_action(),
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Char('h' | 'H') => self.open_history(AppView::Table),
+            KeyCode::Char('?') => self.open_help(AppView::Table),
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
             _ => {}
         }
@@ -351,6 +388,7 @@ impl App {
             KeyCode::Char('t' | 'T') => self.queue_selected_detail_action(SignalAction::Stop),
             KeyCode::Char('r' | 'R') => self.open_selected_restart_confirmation(AppView::Details),
             KeyCode::Char('h' | 'H') => self.open_history(AppView::Details),
+            KeyCode::Char('?') => self.open_help(AppView::Details),
             KeyCode::Char('K') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.open_force_stop_confirmation();
             }
@@ -427,6 +465,7 @@ impl App {
                 self.status = "Closed action history".to_owned();
             }
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
+            KeyCode::Char('?') => self.open_help(AppView::History),
             _ => {}
         }
     }
@@ -435,6 +474,23 @@ impl App {
         self.history_return = return_to;
         self.view = AppView::History;
         self.status = format!("{} completed actions this session", self.history.len());
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') => {
+                self.view = self.help_return;
+                self.status = "Closed help".to_owned();
+            }
+            KeyCode::Char('q' | 'Q') => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn open_help(&mut self, return_to: AppView) {
+        self.help_return = return_to;
+        self.view = AppView::Help;
+        self.status = "PIDRA keyboard and safety help".to_owned();
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
@@ -1178,5 +1234,35 @@ mod tests {
         assert_eq!(app.view, AppView::History);
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(app.view, AppView::Table);
+    }
+
+    #[test]
+    fn requested_pid_opens_details_after_the_first_matching_scan() {
+        let fixture = App::fixture();
+        let target = fixture.all_processes[1].identity;
+        let graphical = fixture.gui_classifications.values().cloned().collect();
+        let mut app = App::new();
+        app.request_initial_pid(Some(target.pid));
+
+        app.apply_scan_batch(ScanBatch {
+            processes: fixture.all_processes,
+            graphical,
+            system: SystemMetrics::default(),
+        });
+
+        assert_eq!(app.view, AppView::Details);
+        assert_eq!(app.details_root, Some(target));
+    }
+
+    #[test]
+    fn help_is_keyboard_reachable_and_returns_to_details() {
+        let mut app = App::fixture();
+        app.focus = FocusColumn::Details;
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert_eq!(app.view, AppView::Help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        assert_eq!(app.view, AppView::Details);
     }
 }

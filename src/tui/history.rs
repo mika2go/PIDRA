@@ -37,6 +37,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(Line::styled("ESC / H BACK     Q QUIT", palette.footer()));
+    lines.push(Line::styled(
+        "ESC / H BACK     ? HELP     Q QUIT",
+        palette.footer(),
+    ));
     frame.render_widget(Paragraph::new(lines), area);
 }

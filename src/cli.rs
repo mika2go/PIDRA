@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use clap::Parser;
 
-const DEFAULT_REFRESH_MS: u64 = 1_000;
-const MIN_REFRESH_MS: u64 = 100;
-const MAX_REFRESH_MS: u64 = 60_000;
+pub const DEFAULT_REFRESH_MS: u64 = 1_000;
+pub const MIN_REFRESH_MS: u64 = 100;
+pub const MAX_REFRESH_MS: u64 = 60_000;
 
 /// PIDRA is a keyboard-first Linux terminal process manager.
 #[derive(Debug, Clone, Parser)]
@@ -26,10 +26,9 @@ pub struct Cli {
     #[arg(
         long = "refresh",
         value_name = "MILLISECONDS",
-        default_value_t = DEFAULT_REFRESH_MS,
         value_parser = parse_refresh
     )]
-    pub refresh_ms: u64,
+    pub refresh_ms: Option<u64>,
 
     /// Open Details for a process after the process backend is enabled.
     #[arg(long, value_name = "PID")]
@@ -38,8 +37,8 @@ pub struct Cli {
 
 impl Cli {
     #[must_use]
-    pub fn refresh_interval(&self) -> Duration {
-        Duration::from_millis(self.refresh_ms)
+    pub fn refresh_interval(&self, configured_ms: u64) -> Duration {
+        Duration::from_millis(self.refresh_ms.unwrap_or(configured_ms))
     }
 }
 
@@ -76,7 +75,7 @@ mod tests {
         assert!(cli.no_mouse);
         assert!(cli.no_color);
         assert!(cli.ascii);
-        assert_eq!(cli.refresh_ms, 250);
+        assert_eq!(cli.refresh_ms, Some(250));
     }
 
     #[test]

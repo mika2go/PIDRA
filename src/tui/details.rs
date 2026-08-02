@@ -185,7 +185,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         },
     ));
     lines.push(Line::from(
-        "ESC BACK   ↑↓ SELECT NODE   ←→ COLLAPSE/EXPAND   H HISTORY   Q QUIT",
+        "ESC BACK   ↑↓ NODE   ←→ COLLAPSE/EXPAND   H HISTORY   ? HELP   Q QUIT",
     ));
 
     frame.render_widget(Paragraph::new(lines), area);

@@ -70,8 +70,7 @@ where
             last_draw = std::time::Instant::now();
         }
 
-        let until_refresh = refresh_interval.saturating_sub(last_draw.elapsed());
-        let poll_timeout = until_refresh.min(Duration::from_millis(100));
+        let poll_timeout = next_poll_timeout(refresh_interval, last_draw.elapsed());
         if event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) => {
@@ -105,4 +104,29 @@ where
     }
 
     Ok(())
+}
+
+fn next_poll_timeout(refresh_interval: Duration, since_last_draw: Duration) -> Duration {
+    refresh_interval
+        .saturating_sub(since_last_draw)
+        .min(Duration::from_millis(100))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::next_poll_timeout;
+
+    #[test]
+    fn idle_event_poll_blocks_instead_of_busy_looping() {
+        assert_eq!(
+            next_poll_timeout(Duration::from_secs(1), Duration::from_millis(10)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            next_poll_timeout(Duration::from_secs(1), Duration::from_secs(1)),
+            Duration::ZERO
+        );
+    }
 }

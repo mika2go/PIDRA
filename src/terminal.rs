@@ -284,4 +284,17 @@ mod tests {
 
         assert_eq!(calls.borrow().len(), call_count);
     }
+
+    #[test]
+    fn disabled_mouse_capture_is_never_enabled_or_disabled() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let ops = RecordingOps {
+            calls: Rc::clone(&calls),
+        };
+        let mut guard = TerminalGuard::enter(ops, false).expect("enter without mouse");
+        guard.restore().expect("restore without mouse");
+
+        assert!(!calls.borrow().contains(&"enable_mouse"));
+        assert!(!calls.borrow().contains(&"disable_mouse"));
+    }
 }

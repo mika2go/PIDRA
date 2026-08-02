@@ -1,5 +1,6 @@
 mod confirm;
 mod details;
+mod help;
 mod history;
 mod layout;
 mod process_table;
@@ -42,6 +43,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         }
         AppView::History => {
             history::render(frame, app, options);
+            return;
+        }
+        AppView::Help => {
+            help::render(frame, options);
             return;
         }
         AppView::Table => {}
@@ -102,9 +107,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             "SEARCH: TYPE NAME OR PID   ⌫ DELETE   ENTER/ESC CLOSE"
         }
     } else if options.ascii {
-        "UP/DOWN ROW   LEFT/RIGHT ACTION   ENTER USE   / SEARCH   H HISTORY   Q QUIT"
+        "UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
     } else {
-        "↑↓ ROW   ←→ ACTION   ENTER USE   / SEARCH   H HISTORY   Q QUIT"
+        "↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
     };
     frame.render_widget(Paragraph::new(footer).style(palette.footer()), areas.footer);
 }
@@ -320,5 +325,93 @@ mod tests {
             identity.pid, identity.start_time_ticks
         )));
         assert!(!rendered.contains("PROCESS NAME"));
+    }
+
+    #[test]
+    fn help_replaces_the_table_and_states_the_safety_contract() {
+        let backend = TestBackend::new(100, 22);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render help");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("PIDRA HELP"));
+        assert!(rendered.contains("PID plus process start time"));
+        assert!(rendered.contains("never escalate automatically"));
+        assert!(!rendered.contains("PROCESS NAME"));
+    }
+
+    #[test]
+    fn ascii_no_color_details_expose_frozen_as_text() {
+        let backend = TestBackend::new(100, 26);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::fixture();
+        app.processes[0].state = crate::process::ProcessState::Stopped;
+        app.all_processes[0].state = crate::process::ProcessState::Stopped;
+        app.focus = FocusColumn::Details;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render frozen details");
+
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("FROZEN"));
+        assert!(rendered.contains("F RESUME"));
+    }
+
+    #[test]
+    fn tiny_viewports_render_without_panicking() {
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).expect("tiny test terminal");
+        let mut app = App::fixture();
+
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render tiny table");
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT));
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &app,
+                    RenderOptions {
+                        ascii: true,
+                        no_color: true,
+                    },
+                );
+            })
+            .expect("render tiny help");
     }
 }
