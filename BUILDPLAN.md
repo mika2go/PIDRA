@@ -644,6 +644,8 @@ unicode = true
 confirm_force_stop = true
 show_kernel_threads = false
 mask_command_secrets = true
+persistent_history = false
+history_capacity = 100
 ```
 
 CLI flags override config. Missing or partially invalid config must produce a
@@ -983,3 +985,95 @@ At the end of Phase 0, run every listed verification command and report the
 created files, test results, remaining limitations, and the exact next phase.
 Do not begin Phase 1 until Phase 0 satisfies its acceptance criteria.
 ```
+
+## 20. Post-MVP implementation plan
+
+This section defines the next coherent feature phase. The original safety
+contract remains unchanged.
+
+### Phase 8.1 — Application-wide resource accounting
+
+- Keep per-process counters as the source of truth.
+- Compute CPU, RSS and I/O totals for every visible GUI or developer root and
+  all descendants, guarding against cycles and duplicate identities.
+- Read `Pss:` from `/proc/<pid>/smaps_rollup` only for members of classified
+  application trees. A missing or unreadable file remains partial data.
+- Show root and tree-wide values separately in Details. The main table uses
+  the complete tree value and labels whether it is PSS or RSS.
+- Never present a partial PSS sum as a complete application total; expose its
+  process coverage alongside the value.
+
+Acceptance:
+
+- descendants contribute exactly once;
+- unrelated processes never contribute;
+- incomplete PSS coverage is explicit;
+- fixture and model tests cover trees, cycles, saturation and PSS parsing.
+
+### Phase 8.2 — Stable sorting and short-term trends
+
+- Add identity-stable sort modes for memory, CPU, name, PID and write rate.
+- Cycle modes with `O`; retain the selected identity and focused action.
+- Retain at most the last 30 seconds of in-memory application samples.
+- Details show memory change over that window and average CPU. No trend data
+  is persisted.
+
+Acceptance:
+
+- every comparator has deterministic name/PID tie breakers;
+- switching modes does not select an unrelated process;
+- vanished identities are pruned from the trend tracker;
+- trends are unavailable, rather than invented, until two samples exist.
+
+### Phase 8.3 — Read-only diagnosis command
+
+- Add `pidra inspect --pid <PID> [--json]`.
+- Scan once without entering raw terminal mode or starting control workers.
+- Emit identity, masked command, process tree, raw and aggregate resources,
+  classification evidence, restart source and termination-risk evidence.
+- Return a failure exit status when the requested PID does not exist.
+
+Acceptance:
+
+- JSON is valid and versioned;
+- secrets use the same masking rules as Details;
+- the command performs no process-control action and creates no history entry.
+
+### Phase 8.4 — Wayland discovery adapters
+
+- Keep compositor discovery isolated behind `WindowHint` adapters.
+- Support Hyprland and Sway native JSON tree output without shell commands.
+- On KDE Plasma and GNOME, retain systemd application-scope evidence when no
+  safe non-interactive compositor PID API is available; make that fallback
+  visible in classification evidence instead of guessing window ownership.
+- Missing compositor utilities, malformed JSON and timeouts yield no hints and
+  never fail the procfs scan.
+
+Acceptance:
+
+- adapter parsers use captured JSON fixtures;
+- only mapped/visible toplevels with positive PIDs become hints;
+- subprocess invocation uses fixed argument vectors and bounded execution.
+
+### Phase 8.5 — Optional persistent action history
+
+- Add disabled-by-default configuration for persistent history and its bounded
+  capacity.
+- Store only timestamp, process display name, PID/start time, action and
+  result. Never store executable paths, working directories or commands.
+- Write a versioned JSONL file below the XDG state directory with atomic
+  bounded rewrites; tolerate a malformed individual line.
+- Surface persistence status in the History view and log non-fatal I/O errors.
+
+Acceptance:
+
+- default behavior remains session-only;
+- capacity applies both in memory and on disk;
+- reload preserves ordering and continues sequence numbers;
+- tests use temporary, test-owned paths.
+
+### Phase 8.6 — Documentation and release gates
+
+- Update README controls, options, configuration and diagnostic examples.
+- Extend terminal smoke tests for sort labels and aggregate values.
+- Run formatting, Clippy, all tests and a release build.

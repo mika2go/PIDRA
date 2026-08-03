@@ -4,6 +4,7 @@ pub mod config;
 pub mod control;
 pub mod event;
 pub mod history;
+pub mod inspect;
 pub mod logging;
 pub mod process;
 pub mod terminal;

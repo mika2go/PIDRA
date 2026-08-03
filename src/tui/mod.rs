@@ -123,15 +123,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         }
     } else if options.ascii {
         if app.developer_layer_active() {
-            "V/ESC GUI  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+            "V/ESC GUI  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  O SORT  / SEARCH  H HISTORY  ? HELP  Q QUIT"
         } else {
-            "V DEV  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+            "V DEV  UP/DOWN ROW  LEFT/RIGHT ACTION  ENTER USE  O SORT  / SEARCH  H HISTORY  ? HELP  Q QUIT"
         }
     } else {
         if app.developer_layer_active() {
-            "V/ESC GUI  ↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+            "V/ESC GUI  ↑↓ ROW  ←→ ACTION  ENTER USE  O SORT  / SEARCH  H HISTORY  ? HELP  Q QUIT"
         } else {
-            "V DEV  ↑↓ ROW  ←→ ACTION  ENTER USE  / SEARCH  H HISTORY  ? HELP  Q QUIT"
+            "V DEV  ↑↓ ROW  ←→ ACTION  ENTER USE  O SORT  / SEARCH  H HISTORY  ? HELP  Q QUIT"
         }
     };
     frame.render_widget(Paragraph::new(footer).style(palette.footer()), areas.footer);
@@ -300,6 +300,8 @@ mod tests {
 
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("PROCESS TREE"));
+        assert!(rendered.contains("APP TREE"));
+        assert!(rendered.contains("TREND"));
         assert!(rendered.contains("TERMINATION ANALYSIS"));
         assert!(rendered.contains("CLOSE FROM APPLICATION FIRST"));
         assert!(!rendered.contains("PROCESS NAME"));

@@ -11,12 +11,23 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     let mut lines = vec![
         Line::styled("PIDRA ACTION HISTORY", palette.header()),
         Line::from(format!(
-            "{} completed action{} in this session",
+            "{} completed action{} {}",
             app.history.len(),
-            if app.history.len() == 1 { "" } else { "s" }
+            if app.history.len() == 1 { "" } else { "s" },
+            if app.history.is_persistent() {
+                "in bounded persistent history"
+            } else {
+                "in this session"
+            }
         )),
         Line::from(""),
     ];
+    if let Some(path) = app.history.persistence_path() {
+        lines.push(Line::from(format!("STORAGE  {}", path.display())));
+    }
+    if let Some(error) = app.history.persistence_error() {
+        lines.push(Line::from(format!("WARNING  {error}")));
+    }
     if app.history.is_empty() {
         lines.push(Line::from("No completed process actions yet."));
     } else {

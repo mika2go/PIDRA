@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
     fs, io,
     os::unix::{ffi::OsStringExt, fs::MetadataExt},
@@ -7,7 +8,7 @@ use std::{
 
 use thiserror::Error;
 
-use super::{ProcessIdentity, ProcessSnapshot, ProcessState};
+use super::{ProcessIdentity, ProcessSnapshot, ProcessState, tree::ProcessTree};
 
 #[derive(Debug, Error)]
 pub enum ProcfsError {
@@ -101,6 +102,7 @@ fn read_process(process_dir: &Path, directory_pid: i32, page_size: u64) -> Optio
         uid,
         state: stat.state,
         rss_bytes,
+        pss_bytes: None,
         virtual_bytes: stat.virtual_bytes,
         cpu_percent: 0.0,
         cpu_time_ticks: stat.cpu_time_ticks,
@@ -113,6 +115,36 @@ fn read_process(process_dir: &Path, directory_pid: i32, page_size: u64) -> Optio
             .ok()
             .map_or_else(Vec::new, |contents| parse_cgroups(&contents)),
     })
+}
+
+pub fn enrich_pss(
+    root: &Path,
+    processes: &mut [ProcessSnapshot],
+    roots: impl IntoIterator<Item = ProcessIdentity>,
+) {
+    let identities: HashSet<_> = {
+        let tree = ProcessTree::new(processes);
+        roots
+            .into_iter()
+            .flat_map(|identity| std::iter::once(identity).chain(tree.descendants(identity)))
+            .collect()
+    };
+    for process in processes {
+        if !identities.contains(&process.identity) {
+            continue;
+        }
+        let process_dir = root.join(process.identity.pid.to_string());
+        let pss = fs::read(process_dir.join("smaps_rollup"))
+            .ok()
+            .and_then(|contents| parse_smaps_rollup_pss(&contents));
+        let identity_still_matches = fs::read(process_dir.join("stat"))
+            .ok()
+            .and_then(|contents| parse_stat(&contents).ok())
+            .is_some_and(|stat| stat.start_time_ticks == process.identity.start_time_ticks);
+        if identity_still_matches {
+            process.pss_bytes = pss;
+        }
+    }
 }
 
 pub fn parse_stat(input: &[u8]) -> Result<ParsedStat, &'static str> {
@@ -206,6 +238,19 @@ fn parse_optional_u64(value: &[u8]) -> Option<u64> {
     std::str::from_utf8(value).ok()?.trim().parse().ok()
 }
 
+fn parse_smaps_rollup_pss(contents: &[u8]) -> Option<u64> {
+    let kib = lines(contents).find_map(|line| {
+        let value = line.strip_prefix(b"Pss:")?;
+        std::str::from_utf8(value)
+            .ok()?
+            .split_ascii_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    Some(kib.saturating_mul(1024))
+}
+
 fn parse_cmdline(contents: &[u8]) -> Vec<OsString> {
     contents
         .split(|byte| *byte == 0)
@@ -229,7 +274,7 @@ fn lines(contents: &[u8]) -> impl Iterator<Item = &[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cmdline, parse_io, parse_stat, parse_status_uid};
+    use super::{parse_cmdline, parse_io, parse_smaps_rollup_pss, parse_stat, parse_status_uid};
     use crate::process::ProcessState;
 
     #[test]
@@ -267,5 +312,14 @@ mod tests {
         let arguments = parse_cmdline(b"app\0arg\xff\0");
         assert_eq!(arguments.len(), 2);
         assert_eq!(arguments[0], "app");
+    }
+
+    #[test]
+    fn parses_pss_from_smaps_rollup_in_kibibytes() {
+        assert_eq!(
+            parse_smaps_rollup_pss(b"Rss: 20 kB\nPss: 12 kB\n"),
+            Some(12 * 1024)
+        );
+        assert_eq!(parse_smaps_rollup_pss(b"Rss: 20 kB\n"), None);
     }
 }

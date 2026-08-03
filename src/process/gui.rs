@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    process::Command,
+    io::Read,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -43,10 +46,32 @@ struct HyprlandClient {
     title: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct SwayNode {
+    #[serde(rename = "type")]
+    node_type: String,
+    pid: Option<i32>,
+    app_id: Option<String>,
+    name: Option<String>,
+    window_properties: Option<SwayWindowProperties>,
+    #[serde(default)]
+    nodes: Vec<SwayNode>,
+    #[serde(default)]
+    floating_nodes: Vec<SwayNode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SwayWindowProperties {
+    class: Option<String>,
+}
+
 pub fn discover_window_hints() -> Vec<WindowHint> {
     let mut hints = Vec::new();
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         hints.extend(discover_hyprland_windows());
+    }
+    if std::env::var_os("SWAYSOCK").is_some() {
+        hints.extend(discover_sway_windows());
     }
     if std::env::var_os("DISPLAY").is_some() {
         hints.extend(discover_x11_windows());
@@ -61,14 +86,20 @@ pub fn discover_window_hints() -> Vec<WindowHint> {
 }
 
 fn discover_hyprland_windows() -> Vec<WindowHint> {
-    let Ok(output) = Command::new("hyprctl").args(["-j", "clients"]).output() else {
+    let mut command = Command::new("hyprctl");
+    command.args(["-j", "clients"]);
+    let Some(output) = bounded_output(&mut command, Duration::from_millis(500)) else {
         return Vec::new();
     };
     if !output.status.success() {
         return Vec::new();
     }
 
-    serde_json::from_slice::<Vec<HyprlandClient>>(&output.stdout).map_or_else(
+    parse_hyprland_clients(&output.stdout)
+}
+
+fn parse_hyprland_clients(contents: &[u8]) -> Vec<WindowHint> {
+    serde_json::from_slice::<Vec<HyprlandClient>>(contents).map_or_else(
         |_| Vec::new(),
         |clients| {
             clients
@@ -83,6 +114,86 @@ fn discover_hyprland_windows() -> Vec<WindowHint> {
                 .collect()
         },
     )
+}
+
+fn discover_sway_windows() -> Vec<WindowHint> {
+    let mut command = Command::new("swaymsg");
+    command.args(["-r", "-t", "get_tree"]);
+    let Some(output) = bounded_output(&mut command, Duration::from_millis(500)) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_sway_tree(&output.stdout)
+}
+
+fn parse_sway_tree(contents: &[u8]) -> Vec<WindowHint> {
+    let Ok(root) = serde_json::from_slice::<SwayNode>(contents) else {
+        return Vec::new();
+    };
+    let mut hints = Vec::new();
+    collect_sway_hints(root, &mut hints);
+    hints
+}
+
+fn collect_sway_hints(node: SwayNode, hints: &mut Vec<WindowHint>) {
+    let class = node.app_id.or_else(|| {
+        node.window_properties
+            .and_then(|properties| properties.class)
+    });
+    if matches!(node.node_type.as_str(), "con" | "floating_con")
+        && node.pid.is_some_and(|pid| pid > 0)
+        && class
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        hints.push(WindowHint {
+            pid: node.pid.unwrap_or_default(),
+            class,
+            title: node.name.filter(|title| !title.trim().is_empty()),
+            source: "Sway IPC mapped toplevel",
+        });
+    }
+    for child in node.nodes.into_iter().chain(node.floating_nodes) {
+        collect_sway_hints(child, hints);
+    }
+}
+
+fn bounded_output(command: &mut Command, timeout: Duration) -> Option<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let stdout_reader = thread::spawn(move || {
+        let mut contents = Vec::new();
+        stdout.read_to_end(&mut contents).map(|_| contents)
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_reader.join().ok()?.ok()?;
+                return Some(Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                return None;
+            }
+        }
+    }
 }
 
 fn discover_x11_windows() -> Vec<WindowHint> {
@@ -211,7 +322,7 @@ pub fn classify_gui_processes(
                 confidence: GuiConfidence::Probable,
                 display_name: scope_display_name(scope),
                 application_scope: Some(scope.clone()),
-                evidence: vec![format!("systemd user application unit {scope}")],
+                evidence: scope_evidence(scope),
             },
         );
     }
@@ -260,6 +371,25 @@ pub fn classify_gui_processes(
     classifications
 }
 
+fn scope_evidence(scope: &str) -> Vec<String> {
+    let mut evidence = vec![format!("systemd user application unit {scope}")];
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if desktop.contains("kde") || desktop.contains("plasma") {
+        evidence.push(
+            "KDE Wayland fallback: application scope used; no safe non-interactive KWin PID mapping available"
+                .to_owned(),
+        );
+    } else if desktop.contains("gnome") {
+        evidence.push(
+            "GNOME Wayland fallback: application scope used; no safe non-interactive Shell PID mapping available"
+                .to_owned(),
+        );
+    }
+    evidence
+}
+
 fn application_scope(process: &ProcessSnapshot) -> Option<String> {
     process.cgroups.iter().find_map(|entry| {
         let path = entry
@@ -299,7 +429,9 @@ fn scope_display_name(scope: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GuiConfidence, WindowHint, classify_gui_processes};
+    use super::{
+        GuiConfidence, WindowHint, classify_gui_processes, parse_hyprland_clients, parse_sway_tree,
+    };
     use crate::process::ProcessSnapshot;
 
     fn process(name: &str, pid: i32, parent_pid: Option<i32>, cgroup: &str) -> ProcessSnapshot {
@@ -350,5 +482,42 @@ mod tests {
         let process = process("daemon", 200, Some(1), "0::/user.slice/background.slice");
 
         assert!(classify_gui_processes(&[process], &[]).is_empty());
+    }
+
+    #[test]
+    fn parses_only_sway_toplevels_with_positive_pids_and_app_identity() {
+        let hints = parse_sway_tree(
+            br#"{
+                "type":"root",
+                "nodes":[{
+                    "type":"workspace",
+                    "nodes":[
+                        {"type":"con","pid":321,"app_id":"org.demo.App","name":"Demo"},
+                        {"type":"con","pid":0,"app_id":"bad","name":"No PID"},
+                        {"type":"con","pid":322,"name":"No app id"}
+                    ]
+                }]
+            }"#,
+        );
+
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pid, 321);
+        assert_eq!(hints[0].class.as_deref(), Some("org.demo.App"));
+        assert_eq!(hints[0].source, "Sway IPC mapped toplevel");
+    }
+
+    #[test]
+    fn parses_only_mapped_hyprland_clients() {
+        let hints = parse_hyprland_clients(
+            br#"[
+                {"mapped":true,"pid":123,"class":"demo","title":"Demo"},
+                {"mapped":false,"pid":124,"class":"hidden","title":"Hidden"},
+                {"mapped":true,"pid":0,"class":"invalid","title":"Invalid"}
+            ]"#,
+        );
+
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].pid, 123);
+        assert_eq!(hints[0].source, "Hyprland mapped client");
     }
 }

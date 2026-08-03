@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use pidra::process::{ProcessState, procfs::scan_procfs};
+use pidra::process::{
+    ProcessState,
+    procfs::{enrich_pss, scan_procfs},
+};
 
 #[test]
 fn scans_fixture_procfs_with_partial_data() {
@@ -38,6 +41,27 @@ fn scans_fixture_procfs_with_partial_data() {
     assert_eq!(unusual.parent_pid, Some(100));
     assert_eq!(unusual.state, ProcessState::Running);
     assert!(unusual.cgroups.is_empty());
+}
+
+#[test]
+fn enriches_pss_only_for_the_requested_process_tree() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/proc");
+    let mut snapshots = scan_procfs(&root).expect("fixture scan");
+    let identity = snapshots
+        .iter()
+        .find(|snapshot| snapshot.identity.pid == 100)
+        .expect("root fixture")
+        .identity;
+
+    enrich_pss(&root, &mut snapshots, [identity]);
+
+    assert_eq!(
+        snapshots
+            .iter()
+            .find(|snapshot| snapshot.identity == identity)
+            .and_then(|snapshot| snapshot.pss_bytes),
+        Some(42 * 1024)
+    );
 }
 
 #[test]

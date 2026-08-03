@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, fmt::Write as _};
 
 #[must_use]
 pub fn masked_command(arguments: &[OsString]) -> String {
@@ -53,7 +53,20 @@ fn quote(value: &str) -> String {
     {
         value.to_owned()
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        let mut escaped = String::with_capacity(value.len());
+        for character in value.chars() {
+            match character {
+                '\'' => escaped.push_str("'\\''"),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                character if character.is_control() => {
+                    let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
+                }
+                character => escaped.push(character),
+            }
+        }
+        format!("'{escaped}'")
     }
 }
 
@@ -80,5 +93,16 @@ mod tests {
         assert!(masked.contains("--token ••••"));
         assert!(masked.contains("--password=••••"));
         assert!(masked.contains("'visible value'"));
+    }
+
+    #[test]
+    fn escapes_terminal_control_characters_and_line_breaks() {
+        let command = [OsString::from("app"), OsString::from("line\n\u{1b}[31mred")];
+        let rendered = masked_command(&command);
+
+        assert!(!rendered.contains('\n'));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(rendered.contains("\\n"));
+        assert!(rendered.contains("\\u{1b}"));
     }
 }

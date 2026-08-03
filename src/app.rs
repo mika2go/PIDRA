@@ -6,8 +6,9 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::process::{
-    DeveloperClassification, GuiClassification, GuiConfidence, ProcessIdentity, ProcessSnapshot,
-    ScanBatch,
+    ApplicationResources, DeveloperClassification, GuiClassification, GuiConfidence,
+    ProcessIdentity, ProcessSnapshot, ResourceTrend, ScanBatch, TrendTracker,
+    aggregate_application_resources,
     cpu::SystemMetrics,
     tree::{ProcessTree, TreeNode},
 };
@@ -62,6 +63,38 @@ pub enum FocusColumn {
     Details,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Memory,
+    Cpu,
+    Name,
+    Pid,
+    WriteRate,
+}
+
+impl SortMode {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Memory => "MEMORY",
+            Self::Cpu => "CPU",
+            Self::Name => "NAME",
+            Self::Pid => "PID",
+            Self::WriteRate => "WRITE",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Memory => Self::Cpu,
+            Self::Cpu => Self::Name,
+            Self::Name => Self::Pid,
+            Self::Pid => Self::WriteRate,
+            Self::WriteRate => Self::Memory,
+        }
+    }
+}
+
 impl FocusColumn {
     fn label(self) -> &'static str {
         match self {
@@ -95,6 +128,8 @@ pub struct App {
     pub gui_classifications: HashMap<ProcessIdentity, GuiClassification>,
     pub developer_classifications: HashMap<ProcessIdentity, DeveloperClassification>,
     pub system_metrics: SystemMetrics,
+    pub resources: HashMap<ProcessIdentity, ApplicationResources>,
+    pub sort_mode: SortMode,
     pub selected: usize,
     pub focus: FocusColumn,
     pub status: String,
@@ -116,6 +151,7 @@ pub struct App {
     queued_diagnosis: HashMap<(ProcessIdentity, SignalAction), DiagnosisContext>,
     pending_observation: HashMap<ProcessIdentity, PendingObservation>,
     pub latest_actions: HashMap<ProcessIdentity, String>,
+    trends: TrendTracker,
     table_view: AppView,
 }
 
@@ -153,6 +189,8 @@ impl App {
             gui_classifications: HashMap::new(),
             developer_classifications: HashMap::new(),
             system_metrics: SystemMetrics::default(),
+            resources: HashMap::new(),
+            sort_mode: SortMode::Memory,
             selected: 0,
             focus: FocusColumn::Restart,
             status: "Scanning /proc…".to_owned(),
@@ -174,8 +212,16 @@ impl App {
             queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
+            trends: TrendTracker::default(),
             table_view: AppView::Table,
         }
+    }
+
+    #[must_use]
+    pub fn with_history(history: ActionHistory) -> Self {
+        let mut app = Self::new();
+        app.history = history;
+        app
     }
 
     #[must_use]
@@ -208,6 +254,8 @@ impl App {
             gui_classifications,
             developer_classifications: HashMap::new(),
             system_metrics: SystemMetrics::default(),
+            resources: HashMap::new(),
+            sort_mode: SortMode::Memory,
             selected: 0,
             focus: FocusColumn::Restart,
             status: "Phase 0 fixture — no real process actions are enabled".to_owned(),
@@ -229,6 +277,7 @@ impl App {
             queued_diagnosis: HashMap::new(),
             pending_observation: HashMap::new(),
             latest_actions: HashMap::new(),
+            trends: TrendTracker::default(),
             table_view: AppView::Table,
         }
     }
@@ -263,6 +312,14 @@ impl App {
             })
             .map(|classification| (classification.identity, classification))
             .collect();
+        let resource_roots = self
+            .gui_classifications
+            .keys()
+            .chain(self.developer_classifications.keys())
+            .copied()
+            .collect::<Vec<_>>();
+        self.resources = aggregate_application_resources(&self.all_processes, resource_roots);
+        self.trends.update(&self.resources);
         self.open_requested_pid();
         self.rebuild_visible(selected_identity);
         self.observe_pending_actions();
@@ -326,17 +383,69 @@ impl App {
             .cloned()
             .collect();
 
-        processes.sort_by(|left, right| {
-            right
-                .rss_bytes
-                .cmp(&left.rss_bytes)
-                .then_with(|| left.name.cmp(&right.name))
-                .then_with(|| left.identity.pid.cmp(&right.identity.pid))
-        });
+        processes.sort_by(|left, right| self.compare_processes(left, right));
         self.processes = processes;
         self.selected = selected_identity
             .and_then(|identity| self.index_of(identity))
             .unwrap_or_else(|| previous_index.min(self.processes.len().saturating_sub(1)));
+    }
+
+    fn compare_processes(
+        &self,
+        left: &ProcessSnapshot,
+        right: &ProcessSnapshot,
+    ) -> std::cmp::Ordering {
+        let left_resources = self.application_resources(left.identity);
+        let right_resources = self.application_resources(right.identity);
+        let primary = match self.sort_mode {
+            SortMode::Memory => right_resources
+                .preferred_memory_bytes()
+                .cmp(&left_resources.preferred_memory_bytes()),
+            SortMode::Cpu => right_resources
+                .cpu_percent
+                .total_cmp(&left_resources.cpu_percent),
+            SortMode::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+            SortMode::Pid => left.identity.pid.cmp(&right.identity.pid),
+            SortMode::WriteRate => right_resources
+                .write_rate_bytes
+                .total_cmp(&left_resources.write_rate_bytes),
+        };
+        primary
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.identity.pid.cmp(&right.identity.pid))
+    }
+
+    #[must_use]
+    pub fn application_resources(&self, identity: ProcessIdentity) -> ApplicationResources {
+        self.resources.get(&identity).copied().unwrap_or_else(|| {
+            self.process_by_identity(identity).map_or_else(
+                ApplicationResources::default,
+                |process| ApplicationResources {
+                    process_count: 1,
+                    cpu_percent: process.cpu_percent,
+                    rss_bytes: process.rss_bytes,
+                    pss_bytes: process.pss_bytes.unwrap_or(0),
+                    pss_process_count: usize::from(process.pss_bytes.is_some()),
+                    read_rate_bytes: process.read_rate_bytes.unwrap_or(0.0),
+                    write_rate_bytes: process.write_rate_bytes.unwrap_or(0.0),
+                },
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn resource_trend(&self, identity: ProcessIdentity) -> Option<ResourceTrend> {
+        self.trends.summary(identity)
+    }
+
+    fn cycle_sort_mode(&mut self) {
+        let selected_identity = self
+            .processes
+            .get(self.selected)
+            .map(|process| process.identity);
+        self.sort_mode = self.sort_mode.next();
+        self.rebuild_visible(selected_identity);
+        self.status = format!("Sorted by {}", self.sort_mode.label());
     }
 
     fn scan_summary(&self) -> String {
@@ -433,6 +542,7 @@ impl App {
             KeyCode::Enter => self.activate_focused_action(),
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Char('v' | 'V') => self.toggle_developer_layer(),
+            KeyCode::Char('o' | 'O') => self.cycle_sort_mode(),
             KeyCode::Char('h' | 'H') => self.open_history(self.table_view),
             KeyCode::Char('?') => self.open_help(self.table_view),
             KeyCode::Char('q' | 'Q') => self.should_quit = true,
@@ -989,7 +1099,7 @@ mod tests {
         ScanBatch, cpu::SystemMetrics,
     };
 
-    use super::{App, AppView, FocusColumn};
+    use super::{App, AppView, FocusColumn, SortMode};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1077,6 +1187,44 @@ mod tests {
         });
 
         assert_eq!(app.processes[app.selected].identity, selected_identity);
+    }
+
+    #[test]
+    fn sort_modes_preserve_identity_and_use_tree_resources() {
+        let mut root = ProcessSnapshot::fixture("z-root", 400, 100);
+        let mut child = ProcessSnapshot::fixture("child", 401, 900);
+        child.parent_pid = Some(root.identity.pid);
+        root.cpu_percent = 1.0;
+        child.cpu_percent = 40.0;
+        let other = ProcessSnapshot::fixture("a-other", 300, 500);
+        let graphical = [&root, &other]
+            .into_iter()
+            .map(|process| GuiClassification {
+                identity: process.identity,
+                confidence: GuiConfidence::Probable,
+                display_name: None,
+                application_scope: None,
+                evidence: vec!["test".to_owned()],
+            })
+            .collect();
+        let mut app = App::new();
+        app.apply_scan_batch(ScanBatch {
+            processes: vec![root.clone(), child, other],
+            graphical,
+            developer: Vec::new(),
+            system: SystemMetrics::default(),
+        });
+
+        assert_eq!(app.processes[0].identity, root.identity);
+        assert_eq!(app.application_resources(root.identity).rss_bytes, 1_000);
+        let selected = app.processes[0].identity;
+        app.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(app.sort_mode, SortMode::Cpu);
+        assert_eq!(app.processes[app.selected].identity, selected);
+        app.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(app.sort_mode, SortMode::Name);
+        assert_eq!(app.processes[0].name, "a-other");
+        assert_eq!(app.processes[app.selected].identity, selected);
     }
 
     #[test]

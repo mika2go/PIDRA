@@ -23,9 +23,24 @@ pub fn render(
         return;
     }
 
-    let header = Row::new(["PROCESS NAME", "ID", "SIZE", "RESTART", "STOP", "DETAILS"])
-        .style(palette.table_header())
-        .bottom_margin(1);
+    let header = Row::new([
+        sort_header(
+            "PROCESS NAME",
+            app.sort_mode == crate::app::SortMode::Name,
+            options,
+        ),
+        sort_header("ID", app.sort_mode == crate::app::SortMode::Pid, options),
+        sort_header(
+            "MEM P/R",
+            app.sort_mode == crate::app::SortMode::Memory,
+            options,
+        ),
+        "RESTART".to_owned(),
+        "STOP".to_owned(),
+        "DETAILS".to_owned(),
+    ])
+    .style(palette.table_header())
+    .bottom_margin(1);
 
     let (start, end) = visible_range(app.processes.len(), app.selected, area.height);
     let rows = app.processes[start..end]
@@ -47,7 +62,7 @@ pub fn render(
         [
             Constraint::Min(18),
             Constraint::Length(8),
-            Constraint::Length(10),
+            Constraint::Length(12),
             Constraint::Length(9),
             Constraint::Length(7),
             Constraint::Length(8),
@@ -65,9 +80,21 @@ fn render_compact(
     options: RenderOptions,
     palette: &Palette,
 ) {
-    let header = Row::new(["PROCESS NAME", "ID", "SIZE"])
-        .style(palette.table_header())
-        .bottom_margin(1);
+    let header = Row::new([
+        sort_header(
+            "PROCESS NAME",
+            app.sort_mode == crate::app::SortMode::Name,
+            options,
+        ),
+        sort_header("ID", app.sort_mode == crate::app::SortMode::Pid, options),
+        sort_header(
+            "MEM P/R",
+            app.sort_mode == crate::app::SortMode::Memory,
+            options,
+        ),
+    ])
+    .style(palette.table_header())
+    .bottom_margin(1);
     let (start, end) = visible_range(app.processes.len(), app.selected, area.height);
     let rows = app.processes[start..end]
         .iter()
@@ -82,7 +109,7 @@ fn render_compact(
             Row::new([
                 Cell::from(format!("{marker}{}", process.name)),
                 Cell::from(process.identity.pid.to_string()),
-                Cell::from(format_bytes(process.rss_bytes)),
+                Cell::from(format_application_memory(app, process)),
             ])
             .style(if selected {
                 palette.selected_row()
@@ -96,7 +123,7 @@ fn render_compact(
             [
                 Constraint::Min(12),
                 Constraint::Length(8),
-                Constraint::Length(10),
+                Constraint::Length(12),
             ],
         )
         .header(header)
@@ -167,7 +194,7 @@ fn row<'a>(
     Row::new(vec![
         Cell::from(format!("{marker}{}", process.name)),
         Cell::from(process.identity.pid.to_string()),
-        Cell::from(format_bytes(process.rss_bytes)),
+        Cell::from(format_application_memory(app, process)),
         action_cell(restart, selected && focus == FocusColumn::Restart, palette),
         action_cell(stop, selected && focus == FocusColumn::Stop, palette),
         action_cell(details, selected && focus == FocusColumn::Details, palette),
@@ -177,6 +204,27 @@ fn row<'a>(
     } else {
         Style::default()
     })
+}
+
+fn sort_header(label: &str, active: bool, options: RenderOptions) -> String {
+    if active {
+        format!("{label}{}", if options.ascii { "v" } else { "↓" })
+    } else {
+        label.to_owned()
+    }
+}
+
+fn format_application_memory(app: &App, process: &ProcessSnapshot) -> String {
+    let resources = app.application_resources(process.identity);
+    format!(
+        "{} {}",
+        format_bytes(resources.preferred_memory_bytes()),
+        if resources.has_complete_pss() {
+            "P"
+        } else {
+            "R"
+        }
+    )
 }
 
 fn action_cell<'a>(label: &'a str, focused: bool, palette: &Palette) -> Cell<'a> {

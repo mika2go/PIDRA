@@ -49,6 +49,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
             .iter()
             .find(|candidate| candidate.identity.pid == parent_pid)
     });
+    let application_root = app.details_root.unwrap_or(process.identity);
+    let application_resources = app.application_resources(application_root);
 
     let mut lines = vec![Line::from(vec![
         Span::styled(process.name.to_uppercase(), palette.header()),
@@ -123,9 +125,12 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
     )));
     lines.push(Line::styled("RESOURCES", palette.table_header()));
     lines.push(Line::from(format!(
-        "CPU {:.1}%   RSS {}   VIRTUAL {}   THREADS {}",
+        "PROCESS  CPU {:.1}%   RSS {}   PSS {}   VIRTUAL {}   THREADS {}",
         process.cpu_percent,
         format_bytes(process.rss_bytes),
+        process
+            .pss_bytes
+            .map_or_else(|| "unavailable".to_owned(), format_bytes,),
         format_bytes(process.virtual_bytes),
         process.thread_count
     )));
@@ -133,6 +138,32 @@ pub fn render(frame: &mut Frame<'_>, app: &App, options: RenderOptions) {
         "READ {}   WRITE {}",
         format_rate(process.read_rate_bytes),
         format_rate(process.write_rate_bytes)
+    )));
+    lines.push(Line::from(format!(
+        "APP TREE {} PROCESSES   CPU {:.1}%   RSS {}   PSS {}",
+        application_resources.process_count,
+        application_resources.cpu_percent,
+        format_bytes(application_resources.rss_bytes),
+        if application_resources.has_complete_pss() {
+            format_bytes(application_resources.pss_bytes)
+        } else if application_resources.pss_process_count == 0 {
+            "unavailable".to_owned()
+        } else {
+            format!(
+                ">= {} ({}/{})",
+                format_bytes(application_resources.pss_bytes),
+                application_resources.pss_process_count,
+                application_resources.process_count
+            )
+        }
+    )));
+    lines.push(Line::from(format!(
+        "APP I/O  READ {}   WRITE {}",
+        format_rate(Some(application_resources.read_rate_bytes)),
+        format_rate(Some(application_resources.write_rate_bytes))
+    )));
+    lines.push(Line::from(format_trend(
+        app.resource_trend(application_root),
     )));
     if let Some(classification) = developer_classification {
         lines.push(Line::styled(
@@ -216,6 +247,29 @@ fn format_rate(rate: Option<f64>) -> String {
     rate.map_or_else(
         || "unavailable".to_owned(),
         |rate| format!("{}/s", format_bytes(rate.max(0.0) as u64)),
+    )
+}
+
+fn format_trend(trend: Option<crate::process::ResourceTrend>) -> String {
+    trend.map_or_else(
+        || "TREND     collecting up to 30 seconds of samples".to_owned(),
+        |trend| {
+            let direction = if trend.memory_delta_bytes > 0 {
+                "+"
+            } else if trend.memory_delta_bytes < 0 {
+                "-"
+            } else {
+                ""
+            };
+            let magnitude =
+                u64::try_from(trend.memory_delta_bytes.unsigned_abs()).unwrap_or(u64::MAX);
+            format!(
+                "TREND     MEMORY {direction}{} / {:.0}s   CPU AVG {:.1}%",
+                format_bytes(magnitude),
+                trend.duration.as_secs_f64(),
+                trend.average_cpu_percent
+            )
+        },
     )
 }
 

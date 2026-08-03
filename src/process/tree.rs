@@ -68,7 +68,7 @@ impl<'a> ProcessTree<'a> {
     pub fn descendants(&self, identity: ProcessIdentity) -> Vec<ProcessIdentity> {
         let mut descendants = Vec::new();
         let mut stack = self.direct_children(identity).to_vec();
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::from([identity]);
         while let Some(child) = stack.pop() {
             if !visited.insert(child) {
                 continue;

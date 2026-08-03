@@ -3,10 +3,12 @@ use std::process::ExitCode;
 use clap::Parser;
 use pidra::{
     app::App,
-    cli::Cli,
+    cli::{Cli, CliCommand},
     config::Config,
     control::{ControlWorker, RestartWorker},
-    event, logging,
+    event,
+    history::ActionHistory,
+    logging,
     process::ScanWorker,
     terminal::{TerminalSession, install_panic_hook},
     tui::RenderOptions,
@@ -23,6 +25,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(CliCommand::Inspect(arguments)) = &cli.command {
+        let report = pidra::inspect::inspect_system(arguments.pid)?;
+        println!("{}", report.render(arguments.json)?);
+        return Ok(());
+    }
     let (config, config_path) = Config::load_default()?;
     let log_path = logging::initialize()?;
     let refresh_interval = cli.refresh_interval(config.refresh_interval_ms);
@@ -39,7 +46,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = TerminalSession::enter(mouse_enabled)?;
     install_panic_hook(mouse_enabled);
 
-    let mut app = App::new();
+    let history = if config.persistent_history {
+        ActionHistory::persistent_default(config.history_capacity).unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "persistent history unavailable; using session history");
+            ActionHistory::new(config.history_capacity)
+        })
+    } else {
+        ActionHistory::new(config.history_capacity)
+    };
+    let mut app = App::with_history(history);
     app.request_initial_pid(cli.pid);
     let scanner = ScanWorker::spawn_system(refresh_interval);
     let control = ControlWorker::spawn();

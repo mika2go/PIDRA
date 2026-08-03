@@ -68,6 +68,16 @@ impl ScanWorker {
                             let graphical = classify_gui_processes(&processes, &window_hints);
                             let developer =
                                 classify_developer_processes(&root, &processes, &graphical);
+                            let roots: Vec<_> = graphical
+                                .iter()
+                                .map(|classification| classification.identity)
+                                .chain(
+                                    developer
+                                        .iter()
+                                        .map(|classification| classification.identity),
+                                )
+                                .collect();
+                            procfs::enrich_pss(&root, &mut processes, roots.iter().copied());
                             ScanBatch {
                                 processes,
                                 graphical,

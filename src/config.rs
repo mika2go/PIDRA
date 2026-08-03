@@ -23,6 +23,8 @@ pub struct Config {
     pub confirm_force_stop: bool,
     pub show_kernel_threads: bool,
     pub mask_command_secrets: bool,
+    pub persistent_history: bool,
+    pub history_capacity: usize,
 }
 
 impl Default for Config {
@@ -35,6 +37,8 @@ impl Default for Config {
             confirm_force_stop: true,
             show_kernel_threads: false,
             mask_command_secrets: true,
+            persistent_history: false,
+            history_capacity: 100,
         }
     }
 }
@@ -101,6 +105,9 @@ fn parse(contents: &str) -> Result<Config, String> {
     if !config.mask_command_secrets {
         return Err("mask_command_secrets cannot be disabled in this release".to_owned());
     }
+    if !(1..=10_000).contains(&config.history_capacity) {
+        return Err("history_capacity must be between 1 and 10000".to_owned());
+    }
     Ok(config)
 }
 
@@ -125,6 +132,9 @@ mod tests {
 
         let error = parse("confirm_force_stop = false").expect_err("unsafe config");
         assert!(error.contains("cannot be disabled"));
+
+        let error = parse("history_capacity = 0").expect_err("empty history capacity");
+        assert!(error.contains("between 1 and 10000"));
     }
 
     #[test]
@@ -140,5 +150,7 @@ mod tests {
         assert!(config.mouse);
         assert!(config.confirm_force_stop);
         assert!(config.mask_command_secrets);
+        assert!(!config.persistent_history);
+        assert_eq!(config.history_capacity, 100);
     }
 }
